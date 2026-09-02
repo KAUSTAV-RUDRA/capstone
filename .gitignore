@@ -1,0 +1,12 @@
+﻿data/
+results/
+venv/
+__pycache__/
+*.pyc
+.env
+*.pt
+*.bin
+db.sqlite3
+media/
+wandb/
+.DS_Store
