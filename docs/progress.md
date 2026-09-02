@@ -5,6 +5,19 @@ Newest entries at the top.
 
 ---
 
+## 2026-09-02 — exp00 HC3 smoke test: Fast-DetectGPT AUROC = 0.9445
+
+- Ran `experiments/exp00_smoke.py` on 100 human + 100 ChatGPT HC3 English answers
+  (Hello-SimpleAI/HC3 `all.jsonl`, pulled via huggingface_hub, prompt-matched by
+  question). Scorer = Qwen/Qwen2.5-0.5B, fp16 on CUDA (RTX 4060, venv python).
+- **AUROC = 0.9445.** Mean curvature — human −0.6951, chatgpt +1.6754 (machine
+  clearly higher, as expected on genuine generations). Wrote
+  `results/exp00_smoke.csv` (gitignored). First Rubric-7 evidence for Review-1.
+- Fixed a Windows `os error 1455` (paging-file) during the CUDA weight load by
+  deferring pandas/sklearn imports until after scoring.
+
+---
+
 ## 2026-09-02 — Head A (stylometric extractor) implemented
 
 - `src/features/stylometric.py` implemented per its scaffolded interface
