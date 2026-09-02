@@ -10,3 +10,4 @@ db.sqlite3
 media/
 wandb/
 .DS_Store
+.claude/

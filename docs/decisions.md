@@ -20,6 +20,25 @@ delete. See `docs/project-context-master.md` §4 (non-negotiables) and §5
 | Adversarial attacks | Back-translation (IndicTrans2), LLM paraphrase, 20%-human-edited hybrids | Matches RAID/DetectRL practice |
 | Real student data | Undecided; proxy corpora primary; go/no-go at week 6 | Approvals uncertain |
 
+### Head A (stylometric) engineering decisions — 2026-09-02
+
+- **POS n-grams and syntactic depth are script-agnostic proxies in Phase 1**, not
+  true taggers/parsers. POS n-grams → function/content-word transition ratios;
+  syntactic depth → punctuation-delimited clauses per sentence. Reason: real
+  per-bucket POS/dependency models (spaCy/stanza) need model downloads that are
+  not in `requirements.txt` and would crash on Devanagari/Telugu when absent
+  (violates non-negotiable #1). The proxies keep Head A running today with
+  stdlib + numpy only and a fixed feature schema.
+  - **TODO (Phase 2 §2.2.2):** replace the two proxy feature groups with real
+    per-bucket POS-tag n-grams and dependency-tree depth, behind the *same*
+    `StylometricExtractor` interface (schema may grow; `feature_names()` stays
+    the source of truth). Pick taggers per bucket: en → spaCy `en_core_web_sm`;
+    hi/te → stanza Indic models; cm → romanised handling TBD. Add whichever
+    models are chosen to `requirements.txt` (ask before installing).
+- **`score()` is a provisional unsupervised head**, not a trained classifier —
+  placeholder until P1's fusion head exists; never surfaced as a verdict
+  (non-negotiable #8).
+
 ### Scaffold-time engineering decisions
 
 - **`src/` third-party imports are guarded under `TYPE_CHECKING`** so the package

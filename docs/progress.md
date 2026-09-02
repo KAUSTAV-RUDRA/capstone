@@ -5,6 +5,34 @@ Newest entries at the top.
 
 ---
 
+## 2026-09-02 — Head A (stylometric extractor) implemented
+
+- `src/features/stylometric.py` implemented per its scaffolded interface
+  (`fit`/`transform`/`fit_transform`/`feature_names`/`score`, all unchanged).
+- **25 features, fixed schema:** lexical diversity (TTR, root-TTR, MTLD, hapax,
+  bigram-repeat), length/shape + burstiness (sentence- and word-length),
+  language-aware function-word ratio + function/content transition proxies,
+  clause-depth proxy, punctuation profile, char-class ratios.
+- **Dependency-free (stdlib + numpy):** no spaCy/stanza model load → no download,
+  no crash on Devanagari/Telugu. Unicode-aware tokenisation; danda (`।`) sentence
+  splitting. Per-bucket function-word lists (`en`/`hi`/`te`/`cm`); `fit` stores
+  global + per-bucket norms (`bucket_norms_`) for the §2.2.2 importance work.
+- **POS n-grams / syntactic depth are proxies for now** (function/content-word
+  transitions; punctuation-delimited clause depth). Real per-bucket taggers/
+  parsers deferred to Phase 2 §2.2.2 — see `docs/decisions.md`.
+- `score()` is a **provisional, uncalibrated** unsupervised head (bursty/less-
+  repetitive → human), a placeholder for P1's trained fusion head (non-neg #8).
+
+**Verify:** `PYTHONIOENCODING=utf-8 PYTHONPATH=. python src/features/stylometric.py`
+→ prints `feature matrix shape: (5, 25)`, the 25 ordered names, per-sample scores.
+Runs on all 5 samples (en×2, hi, te, hinglish); edge cases (empty/whitespace/
+single-word/punct-only/Indic-only) all finite.
+
+**Next:** Phase 1 Day 2 — P2 runs Head A on 50 hi + 50 te + 50 hinglish samples
+for the per-language feature-distribution plot (Rubric-7 evidence).
+
+---
+
 ## 2026-09-02 — Scaffold complete
 
 - Repository scaffolded to match `docs/project-context-master.md` §8.
