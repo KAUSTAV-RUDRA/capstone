@@ -1,0 +1,46 @@
+{% extends "detector/base.html" %}
+{% block title %}MGT Detector - Home{% endblock %}
+{% block content %}
+<div class="p-5 mb-4 bg-body-tertiary rounded-3">
+  <div class="container-fluid py-2">
+    <h1 class="display-6 fw-bold">Multilingual Machine-Generated Text Detection</h1>
+    <p class="col-lg-9 fs-5">
+      A detector that distinguishes human-written from LLM-written student text
+      across English, Hindi, Telugu, and Romanised code-mixed input. It fuses
+      stylometric features with perplexity-curvature, calibrates a false-positive
+      guarantee <em>per language</em>, and abstains when unsure &mdash; returning
+      <strong>human / abstain / machine</strong> as decision support for a reviewer.
+    </p>
+    <div class="d-flex flex-wrap gap-2 mt-3">
+      <a class="btn btn-primary btn-lg" href="{% url 'detector:analyse' %}">Analyse text</a>
+      <a class="btn btn-outline-secondary btn-lg" href="{% url 'detector:batch' %}">Batch upload</a>
+      <a class="btn btn-outline-secondary btn-lg" href="{% url 'detector:dashboard' %}">Dashboard</a>
+      <a class="btn btn-outline-secondary btn-lg" href="{% url 'detector:about' %}">About</a>
+    </div>
+  </div>
+</div>
+
+<div class="row g-4">
+  <div class="col-md-4">
+    <div class="card h-100"><div class="card-body">
+      <h5 class="card-title">Curvature, not perplexity</h5>
+      <p class="card-text">Fast-DetectGPT curvature avoids the low-perplexity bias
+        that flags non-native writing as AI.</p>
+    </div></div>
+  </div>
+  <div class="col-md-4">
+    <div class="card h-100"><div class="card-body">
+      <h5 class="card-title">Per-language calibration</h5>
+      <p class="card-text">Split-conformal thresholds fitted per bucket bound the
+        false-positive rate in every language.</p>
+    </div></div>
+  </div>
+  <div class="col-md-4">
+    <div class="card h-100"><div class="card-body">
+      <h5 class="card-title">It can say "I don't know"</h5>
+      <p class="card-text">A three-way abstention gate refuses to guess when the
+        signal is weak &mdash; the safeguard against wrongful accusation.</p>
+    </div></div>
+  </div>
+</div>
+{% endblock %}

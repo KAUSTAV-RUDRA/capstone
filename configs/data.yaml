@@ -1,0 +1,52 @@
+# Data / corpus configuration.
+
+buckets: [en, hi, te, cm]
+
+# Frozen split (non-negotiable #6): written once, never regenerated.
+splits_file: data/processed/splits.json
+splits:
+  train: 0.6
+  cal: 0.2
+  test: 0.2
+
+# Minimum human counts per bucket (locked §5).
+min_human_calibration_per_bucket: 1000
+min_human_train_test_per_bucket: 1500
+
+# Held-outs (non-negotiable #4): 2 unseen generators + 1 domain, test only.
+heldout_generators: []
+heldout_domain: null
+
+# Adversarial attack families (matches RAID/DetectRL practice).
+attack_types: [clean, paraphrase, back_translation, hybrid]
+
+# Writer L1/L2 bands for the fairness audit (T5).
+writer_l1_bands: [native, non_native, unknown]
+
+# Per-sample schema (docs/project-context-master.md §6).
+schema_fields:
+  - id
+  - text
+  - label
+  - language
+  - code_mix_ratio
+  - generator
+  - domain
+  - length_tokens
+  - attack_type
+  - writer_L1_band
+  - split
+
+sources:
+  benchmarks:
+    - m4gt_bench      # primary multilingual
+    - raid            # adversarial subsets
+    - hc3             # smoke tests
+  human:
+    - indiccorp
+    - ai4bharat_catalog
+    - hinge
+    - comi_lingua
+    - l3cube
+    - indian_student_essays
+    - toefl_l2

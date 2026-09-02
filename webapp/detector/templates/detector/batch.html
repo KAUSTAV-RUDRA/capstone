@@ -1,0 +1,43 @@
+{% extends "detector/base.html" %}
+{% block title %}Batch - MGT Detector{% endblock %}
+{% block content %}
+<h1 class="h3 mb-3">Batch analysis</h1>
+
+<form method="post" enctype="multipart/form-data" class="row g-2 align-items-end mb-4" novalidate>
+  {% csrf_token %}
+  <div class="col-sm-8">
+    <label class="form-label" for="{{ form.csv_file.id_for_label }}">{{ form.csv_file.label }}</label>
+    {{ form.csv_file }}
+    {{ form.csv_file.errors }}
+  </div>
+  <div class="col-sm-4">
+    <button type="submit" class="btn btn-primary">Upload &amp; analyse</button>
+  </div>
+</form>
+
+{% if submitted %}
+<div class="alert alert-info">Placeholder: CSV parsing is wired in a later phase. Showing sample rows.</div>
+{% endif %}
+
+<div class="table-responsive">
+  <table class="table table-striped align-middle">
+    <thead>
+      <tr><th>#</th><th>Filename</th><th>Language</th><th>Verdict</th><th>Confidence</th><th>Driving head</th></tr>
+    </thead>
+    <tbody>
+      {% for r in rows %}
+      <tr>
+        <td>{{ r.row }}</td>
+        <td>{{ r.filename }}</td>
+        <td>{{ r.language }}</td>
+        <td><span class="badge verdict-badge verdict-{{ r.verdict|lower }}">{{ r.verdict }}</span></td>
+        <td>{{ r.confidence }}</td>
+        <td>{{ r.driving_head }}</td>
+      </tr>
+      {% empty %}
+      <tr><td colspan="6" class="text-muted">No rows.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

@@ -1,0 +1,33 @@
+# Model configuration.
+
+# Head B scorer: only multilingual causal LM with real Telugu coverage at a
+# runnable size (locked §5). Fallback used if mGPT is too heavy on the host.
+scorer_model: "ai-forever/mGPT"
+scorer_model_fallback: "Qwen/Qwen2.5-0.5B"
+
+# Head C encoder (MuRIL): encoder-only, embeddings ONLY, never curvature
+# (non-negotiable #9). Used only if VRAM >= head_c_vram_threshold_gb.
+semantic_model: "google/muril-base-cased"
+
+# Supervised baseline (XLM-R). No fine-tuning above 2B params (non-negotiable #5).
+supervised_baseline: "xlm-roberta-base"
+
+# Perturbation model for the DetectGPT baseline.
+perturbation_model: "google/mt5-small"
+
+load_in_8bit: false      # set true to fit the 4GB VRAM floor
+max_length: 512
+device: cpu
+
+# Hardware gates (non-negotiable #5).
+vram_floor_gb: 4
+head_c_vram_threshold_gb: 8
+
+# Seen generators via local Ollama (3 open models, reproducible).
+seen_generators:
+  - "llama3:8b"
+  - "gemma2:9b"
+  - "mistral:7b"
+
+# Held-out generators: TEST ONLY (non-negotiable #4). To be filled.
+heldout_generators: []
