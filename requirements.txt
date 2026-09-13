@@ -1,7 +1,10 @@
 # mgt-detect dependencies (pinned).
 # Install:  pip install -r requirements.txt
-# Note: torch is pinned to the CPU-compatible release already on the dev box.
-# For CUDA, install the matching torch build from https://pytorch.org first.
+# Note: torch 2.6.0 must come from the CUDA index, NOT PyPI - the PyPI wheel is
+# CPU-only and every GPU part (generation, scoring, attacks) would silently run
+# on CPU. After `pip install -r requirements.txt`, overwrite torch with:
+#   pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu126
+# (cu126 matches the dev box; pick the build for your driver at pytorch.org.)
 
 # --- Core ML / numerics ---
 torch==2.6.0

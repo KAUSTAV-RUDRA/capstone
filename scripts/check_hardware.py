@@ -15,7 +15,11 @@ import platform
 import sys
 
 VRAM_FLOOR_GB = 4.0
-HEAD_C_VRAM_THRESHOLD_GB = 8.0
+# Thresholds are compared against torch's total_memory, which is GiB (binary).
+# An "8 GB" card is 8.0 decimal GB = 7.9956 GiB, so an 8.0 gate rejects it on a
+# unit mismatch alone. 7.5 GiB admits genuine 8 GB cards and still excludes 6 GB
+# ones (5.6 GiB). See docs/decisions.md 2026-09-13.
+HEAD_C_VRAM_THRESHOLD_GB = 7.5
 _BYTES_PER_GB = 1024 ** 3
 
 
@@ -105,7 +109,7 @@ def report() -> None:
     print(f"VRAM floor   : {'OK' if max_vram >= VRAM_FLOOR_GB else 'BELOW FLOOR'} "
           f"(need >= {VRAM_FLOOR_GB:.0f} GB)")
     print(f"Head C       : {'eligible' if max_vram >= HEAD_C_VRAM_THRESHOLD_GB else 'SKIP'} "
-          f"(needs >= {HEAD_C_VRAM_THRESHOLD_GB:.0f} GB, §2.2.5)")
+          f"(needs >= {HEAD_C_VRAM_THRESHOLD_GB:.1f} GiB, §2.2.5)")
     print("=" * 60)
 
 

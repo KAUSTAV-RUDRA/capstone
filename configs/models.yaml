@@ -21,7 +21,7 @@ device: cpu
 
 # Hardware gates (non-negotiable #5).
 vram_floor_gb: 4
-head_c_vram_threshold_gb: 8
+head_c_vram_threshold_gb: 7.5   # GiB, matching scripts/check_hardware.py: an "8 GB" card is 7.9956 GiB
 
 # Seen generators via local Ollama (3 open models, reproducible).
 seen_generators:

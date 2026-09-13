@@ -79,6 +79,33 @@ interpreter; rebuilt with Anaconda Python 3.12.4 (`pyvenv.cfg` home) and
 the CPU build from `requirements.txt`; GPU parts need the CUDA build installed
 over it (see the note at the top of `requirements.txt`).
 
+## 2026-09-13 — Head C enabled; CUDA torch locked
+
+**Head C enabled — RTX 4060 8 GB (7.9956 GiB); gate set to 7.5 GiB.**
+
+The `>= 8.0` gate in `scripts/check_hardware.py` compared torch's
+`total_memory`, which is binary GiB, against a threshold written in decimal GB.
+The card reports 8,585,216,000 bytes = 8.59 decimal GB = 7.9956 GiB, so it
+failed by 0.0044 GiB on units alone, not on capability. Threshold lowered to
+7.5 GiB in `scripts/check_hardware.py` and in `configs/models.yaml`
+(`head_c_vram_threshold_gb`), which carried the same gate. 7.5 GiB admits
+genuine 8 GB cards and still excludes 6 GB ones (5.6 GiB). The
+non-negotiable #5 intent ("Head C only if VRAM >= 8GB") is unchanged; only the
+unit is corrected. Head C (MuRIL, encoder-only, non-negotiable #9) is therefore
+IN scope — parts-plan Part 16.
+
+**Host profile** (`python scripts/check_hardware.py`): Windows 11, Intel 20
+logical CPUs, 15.7 GB RAM, 1 x NVIDIA GeForce RTX 4060 Laptop GPU, 7.9956 GiB
+VRAM, compute capability 8.9, ~6.85 GiB free at idle.
+
+**torch pinned to the CUDA build.** `torch==2.6.0` from PyPI is CPU-only; every
+GPU stage (generation, scoring, attacks) would have run on CPU without warning.
+The venv now has `2.6.0+cu126` from `https://download.pytorch.org/whl/cu126`
+(`torch.cuda.is_available()` True, fp16 matmul verified on device,
+`bitsandbytes` 0.45.3 imports). `requirements.txt` keeps the `torch==2.6.0` pin
+and its header now names the CUDA index command, since a plain
+`pip install -r requirements.txt` silently reinstates the CPU wheel.
+
 ---
 
 ## Decisions still open (fill as resolved)
@@ -86,7 +113,7 @@ over it (see the note at the top of `requirements.txt`).
 - [ ] Phase 0.1 — what "patent" means (disclosure / IPR-cell / IPO provisional).
 - [ ] Phase 0.2 — what "consultancy" means; internal client acceptable?
 - [ ] Scorer lock — after the mGPT vs Qwen tokenizer-fertility test (Day 3).
-- [ ] Head C — include only if host VRAM ≥ 8GB (`scripts/check_hardware.py`).
+- [x] Head C — **included**; 7.9956 GiB card vs a 7.5 GiB gate (2026-09-13, above).
 - [ ] Fusion — logistic vs GBM, decided on calibration AUROC.
 - [ ] Paper venue — ICON / IEEE-Springer / journal fallback.
 - [ ] Held-out generators — the two names to put in `configs/*.yaml`.
