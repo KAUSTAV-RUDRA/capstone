@@ -5,6 +5,50 @@ Newest entries at the top.
 
 ---
 
+## 2026-09-13 — Part 2: hi and te human corpora (2,200 passages each)
+
+- Added `indiccorp_v2` to the loader registry and hi / te entries to
+  `configs/data.yaml`. Both buckets use a single band, `writer_L1_band=native`
+  (added to `WRITER_L1_BANDS`), with IndicCorpV2 primary and Wikipedia as a
+  pure fallback.
+- **hi** (`data/raw/human/hi.jsonl`): 2,200 rows, mean 164.0 words, median 150.
+  All from IndicCorpV2 `hin_Deva`. 32,646 documents read, 93.3 % rejected —
+  length 30,057 (92.1 %), artefact 364 (1.1 %), wrong script 25 (0.1 %).
+- **te** (`data/raw/human/te.jsonl`): 2,200 rows, mean 161.3 words, median 147.
+  All from IndicCorpV2 `tel_Telu`. 106,950 documents read, 97.9 % rejected —
+  length 104,251 (97.5 %), artefact 474 (0.4 %), wrong script 24 (0.0 %),
+  near-duplicate 1. Telugu needs ~3x the streaming of Hindi because only ~2 % of
+  its documents reach 120 words.
+- Wikipedia hi / te were configured but never read: IndicCorpV2 filled both
+  targets on its own.
+- **Same cleaning discipline as en, extended for Indic:** space before a danda
+  (` ।`) now counts as an artefact; `wikipedia_prose` no longer mistakes a short
+  danda-terminated line for a heading; a new per-source script gate
+  (`script` + `min_script_ratio: 0.8`) keeps each bucket monolingual while still
+  allowing the Latin loanwords normal in Indian news.
+- **Fixed a real bug in the new script check:** counting the Devanagari block
+  directly put combining vowel signs in the numerator but not the denominator,
+  so ordinary Hindi scored above 1.0. The numerator is now the subset of letters
+  in range.
+- The run summary now prints a per-source "documents read vs rejected" table
+  with a reason breakdown.
+- **Quality:** both buckets are 100 % within 120-300 words, zero residual
+  artefacts, zero exact-duplicate texts, script ratio mean 0.99 and min 0.80.
+- **Resume verified:** re-running either bucket at the same target is a 2-3 s
+  no-op that leaves the file hash unchanged.
+
+**Verify:** `.env\Scripts\python.exe tests\data	est_build_human_corpus.py`
+→ 11 × PASS (offline). Then
+`.env\Scripts\python.exe -m src.data.build_human_corpus --bucket hi --target 2200`
+(and `--bucket te`) → each prints its band table and `complete` within seconds.
+
+**Next:** Part 3 — cm sources (COMI-LINGUA, cmu_hinglish_dog, a HinGE mirror),
+then the corpus card. Note for Part 13: en averages 210.6 words vs ~163 for
+hi/te, and hi/te are single-domain news while en is mixed — both need handling
+before cross-bucket comparison.
+
+---
+
 ## 2026-09-13 — Part 1: en human corpus (2,200 passages, two writer bands)
 
 - `src/data/build_human_corpus.py` implemented as a resumable CLI

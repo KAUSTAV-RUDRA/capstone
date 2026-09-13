@@ -62,6 +62,31 @@ def test_samanantar_sentence_filter() -> None:
     assert not ok("यह हिंदी वाक्य है और यह अंग्रेज़ी नहीं है ठीक")           # not English side
 
 
+def test_script_ratio_and_indic_artefacts() -> None:
+    hindi = "यह एक हिंदी वाक्य है और इसमें कोई अंग्रेज़ी नहीं है।"
+    telugu = "ఇది ఒక తెలుగు వాక్యం మరియు ఇందులో ఆంగ్లం లేదు."
+    assert bhc.script_ratio(hindi, "deva") == 1.0
+    assert bhc.script_ratio(telugu, "telu") == 1.0
+    assert bhc.script_ratio(hindi, "telu") == 0.0
+    assert bhc.script_ratio("This is English only.", "deva") == 0.0
+    # Loanwords and acronyms in Latin must not fail an 0.8 gate.
+    mixed = "भारत में COVID टीकाकरण अभियान तेज़ी से चल रहा है और लोग सहयोग कर रहे हैं।"
+    assert bhc.script_ratio(mixed, "deva") > 0.8
+    # A half-English passage must fail it (bucket purity).
+    assert bhc.script_ratio("भारत में vaccination drive is moving quickly across all states now", "deva") < 0.8
+    assert bhc.script_ratio("", "deva") == 0.0
+    # Space before a danda is the Devanagari form of the space-before-punctuation artefact.
+    assert bhc.has_artefact("यह एक वाक्य है ।")
+    assert not bhc.has_artefact(hindi)
+    assert not bhc.has_artefact(telugu)
+
+
+def test_wikipedia_prose_keeps_danda_sentences() -> None:
+    # A short Devanagari line ending in a danda is a sentence, not a heading.
+    text = "भारत एक देश है।\n\nइतिहास\n\nयह प्राचीन है।"
+    assert bhc.wikipedia_prose(text) == "भारत एक देश है। यह प्राचीन है।"
+
+
 def test_allocate_sums_to_target() -> None:
     assert bhc.allocate(2200, {"general": 0.5, "indian": 0.5}) == {"general": 1100, "indian": 1100}
     alloc = bhc.allocate(2201, {"a": 1, "b": 1, "c": 1})
@@ -96,6 +121,7 @@ def test_build_is_resumable_and_idempotent() -> None:
             }}},
         }}
         s1 = bhc.build("en", 20, config)
+        assert sum(p["accepted"] for p in s1["pulls"].values()) == 20
         assert s1["rows"] == 20 and s1["bands"]["general"]["rows"] == 10 and s1["bands"]["indian"]["rows"] == 10
         # Second run: nothing new to pull, file unchanged, ids unique.
         s2 = bhc.build("en", 20, config)

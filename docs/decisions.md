@@ -106,6 +106,46 @@ The venv now has `2.6.0+cu126` from `https://download.pytorch.org/whl/cu126`
 and its header now names the CUDA index command, since a plain
 `pip install -r requirements.txt` silently reinstates the CPU wheel.
 
+## 2026-09-13 — Human corpus (Part 2): hi and te sources
+
+| Decision | Value | Why |
+|---|---|---|
+| `writer_L1_band` for hi / te / cm | `native` (added to `WRITER_L1_BANDS`) | These buckets are first-language writers; the general/indian L1-proxy split is an English-only construct for T5. |
+| hi / te primary source | `ai4bharat/IndicCorpV2`, splits `hin_Deva` and `tel_Telu` | CC-0 (the most permissive licence in the corpus), crawled Indian news/web, large enough to fill both buckets alone. |
+| hi / te fallback | `wikimedia/wikipedia` 20231101.hi / .te, page id <= 100,000 | Kept configured but UNUSED — IndicCorpV2 filled both targets, so neither bucket read a Wikipedia row. |
+| Script purity gate | `script` + `min_script_ratio: 0.8` per source, checked on the finished passage | Per-language calibration is meaningless if the hi bucket contains English. 0.8 admits the Latin loanwords and acronyms that are normal in Indian news, and rejected 25 (hi) / 24 (te) passages. |
+| Artefact rule extended to Devanagari | Space before danda (` ।` / ` ॥`) now counts as an artefact | Same class of scrape artefact as space-before-comma in English; only 3.4 % of candidate hi passages, 0 % of te. |
+
+**IndicCorpV2 is addressed by split, not by config.** The brief assumed
+`config hi`. The repo exposes ONE config, `indiccorp_v2`, whose splits are the
+languages (`hin_Deva`, `tel_Telu`); `data/hi-*.txt` and `data/te.txt` are 26 GB
+and 16 GB, so the loader always streams and never downloads. Format is one
+document per line, blank-line separated.
+
+**Yield is low, so `max_docs` is large.** Only ~7 % of Hindi documents and
+~2 % of Telugu documents are long enough to give a 120-300 word passage, so the
+"first ~20k docs" in the brief would have produced roughly 1,400 (hi) and 470
+(te). `max_docs` is set to 120,000 (hi) and 400,000 (te); the actual runs read
+32,646 and 106,950 documents before hitting 2,200 rows.
+
+**Bug found and fixed in `script_ratio`.** Counting characters in the Devanagari
+block directly put combining vowel signs in the numerator but not the
+denominator, which made the ratio exceed 1.0 for ordinary Hindi. The numerator
+is now the subset of the *letters* that are in the script's range.
+
+### Two asymmetries to carry into the results
+
+1. **Domain.** `en` is a mix (Reddit ELI5 QA, Wikipedia CS/AI, Wikipedia
+   general, Indian news), while `hi` and `te` are 100 % `news_web`, because the
+   brief made Wikipedia a pure fallback and IndicCorpV2 never fell short. Any
+   per-bucket difference in T1/T5 is therefore partly a domain difference.
+   Changing `max_share` on the IndicCorpV2 entries in `configs/data.yaml` (e.g.
+   to 0.75) would mix Wikipedia in without touching code.
+2. **Length.** Mean passage length is 210.6 words for `en` but 164.0 (`hi`) and
+   161.3 (`te`), because IndicCorpV2 documents are short. Part 13's
+   length-matching step must equalise this before any head is compared across
+   buckets.
+
 ---
 
 ## Decisions still open (fill as resolved)

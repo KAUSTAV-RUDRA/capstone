@@ -70,8 +70,37 @@ _REPLACEMENT_CHAR = "�"
 _ARTEFACT_RE = re.compile(
     r"\\(?:displaystyle|textstyle|scriptstyle|left|right|frac|sqrt|mathbf|ldots)\b"
     r"|\[\[|\]\]|\{\{|<ref|&nbsp;|thumb\||URL_\d"
-    r"|\s[,;:!?]|\s\.(?!\.)"
+    r"|\s[,;:!?।॥]|\s\.(?!\.)"
 )
+
+# Alphabet of each bucket's script, for the purity check that keeps a bucket
+# monolingual (per-language calibration is meaningless if hi is half English).
+# Indic loanwords and acronyms stay in Latin, so the gate is a ratio, not "all".
+SCRIPT_RANGES: dict[str, str] = {
+    "deva": r"ऀ-ॿ꣠-ꣿ",   # Devanagari (+ extended) - hi, and cm when not romanised
+    "telu": r"ఀ-౿",                # Telugu - te
+    "latn": r"A-Za-z",                       # Latin - en, and romanised cm
+}
+_SCRIPT_RE_CACHE: dict[str, re.Pattern[str]] = {}
+
+
+def script_ratio(text: str, script: str) -> float:
+    """Fraction of the letters in ``text`` that belong to ``script`` (0.0-1.0).
+
+    Only characters counted as letters by ``_ANY_ALPHA_RE`` form the
+    denominator, and the numerator is the subset of *those* in the script's
+    range. Counting the range directly would include Devanagari combining
+    vowel signs, which are not letters, and push the ratio above 1.0.
+    """
+    if script not in SCRIPT_RANGES:
+        raise KeyError(f"unknown script '{script}' (known: {sorted(SCRIPT_RANGES)})")
+    letters = _ANY_ALPHA_RE.findall(text)
+    if not letters:
+        return 0.0
+    pattern = _SCRIPT_RE_CACHE.get(script)
+    if pattern is None:
+        pattern = _SCRIPT_RE_CACHE[script] = re.compile(f"[{SCRIPT_RANGES[script]}]")
+    return sum(1 for ch in letters if pattern.match(ch)) / len(letters)
 
 
 def repair_holes(text: str) -> str:
@@ -136,7 +165,7 @@ def wikipedia_prose(text: str) -> str:
         if not para or para.startswith(_WIKI_SKIP_PREFIXES):
             continue
         # Section headings are short lines with no terminal punctuation.
-        if n_words(para) <= 8 and not para.endswith((".", "!", "?", '"', ")")):
+        if n_words(para) <= 8 and not para.endswith((".", "!", "?", '"', ")", "।", "॥")):
             continue
         paragraphs.append(para)
     return repair_holes(" ".join(paragraphs))
@@ -371,10 +400,40 @@ def iter_samanantar_en(spec: dict[str, Any], ctx: LoaderContext) -> Iterator[Raw
                 buf, idxs, total = [], [], 0
 
 
+def iter_indiccorp_v2(spec: dict[str, Any], ctx: LoaderContext) -> Iterator[RawDoc]:
+    """ai4bharat/IndicCorpV2 (CC-0): one document per line, blank-line separated.
+
+    The repo exposes a SINGLE config, ``indiccorp_v2``, whose *splits* are the
+    languages (``hin_Deva``, ``tel_Telu``) - there is no per-language config.
+    The language files are 16-27 GB, so this always streams and never downloads;
+    ``max_docs`` caps how far it reads. Only ~7 % (hi) and ~2 % (te) of documents
+    are long enough to yield a 120-300 word passage, so max_docs must be well
+    above the row target.
+    """
+    from datasets import load_dataset
+
+    split = spec["split"]
+    ds = load_dataset(spec.get("repo", "ai4bharat/IndicCorpV2"),
+                      spec.get("config", "indiccorp_v2"), split=split, streaming=True)
+    max_docs = int(spec.get("max_docs", 250_000))
+    for i, row in enumerate(ds):
+        if i >= max_docs:
+            log.info("indiccorp_v2/%s: stopping at max_docs=%d", split, max_docs)
+            return
+        text = normalise_ws(row.get("text") or "")
+        if not text:
+            continue  # blank separator line
+        yield RawDoc(
+            source=spec["name"], source_id=f"{split}:{i}", text=text,
+            domain=spec.get("domain", "news_web"), provenance=spec.get("provenance", "indiccorp_v2"),
+        )
+
+
 SOURCE_LOADERS: dict[str, Callable[[dict[str, Any], LoaderContext], Iterator[RawDoc]]] = {
     "hc3": iter_hc3,
     "wikipedia": iter_wikipedia,
     "samanantar_en": iter_samanantar_en,
+    "indiccorp_v2": iter_indiccorp_v2,
 }
 
 # ---------------------------------------------------------------------------
@@ -413,12 +472,15 @@ def pull_source(
     deduper: Deduper,
     ctx: LoaderContext,
     deadline: float | None,
-) -> tuple[int, bool]:
+) -> tuple[int, bool, dict[str, Any]]:
     """Pull up to ``want`` new passages from one source, appending each to ``out_path``.
 
-    Returns ``(accepted, stopped_by_time_budget)``.
+    Returns ``(accepted, stopped_by_time_budget, stats)`` where ``stats`` holds
+    ``seen`` (documents read) and ``rejected`` (a reason -> count Counter).
     """
     name = spec["name"]
+    script = spec.get("script")
+    min_script = float(spec.get("min_script_ratio", 0.8))
     loader = SOURCE_LOADERS.get(spec.get("loader", name))
     if loader is None:
         raise KeyError(f"no loader registered for source '{name}' (known: {sorted(SOURCE_LOADERS)})")
@@ -439,6 +501,9 @@ def pull_source(
             if has_artefact(passage):
                 rejected["artefact"] += 1
                 continue
+            if script and script_ratio(passage, script) < min_script:
+                rejected["wrong_script"] += 1
+                continue
             if not deduper.check_and_add(row_id, passage):
                 rejected["near_duplicate"] += 1
                 continue
@@ -452,12 +517,12 @@ def pull_source(
                 break
             if deadline is not None and time.monotonic() > deadline:
                 log.warning("[%s/%s] %s: time budget reached after %d passages", bucket, band, name, accepted)
-                return accepted, True
+                return accepted, True, {"seen": seen, "rejected": dict(rejected)}
     log.info("[%s/%s] %s: accepted %d of %d docs seen; rejected %s",
              bucket, band, name, accepted, seen, dict(rejected) or "none")
     if accepted < want:
         log.warning("[%s/%s] %s exhausted %d short of its quota", bucket, band, name, want - accepted)
-    return accepted, False
+    return accepted, False, {"seen": seen, "rejected": dict(rejected)}
 
 
 def summarise(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -508,6 +573,7 @@ def build(bucket: str, target: int, config: dict[str, Any], seed: int = 42, max_
     band_targets = allocate(int(target), {b: float(c.get("share", 1.0)) for b, c in bands.items()})
     deadline = time.monotonic() + max_minutes * 60 if max_minutes and max_minutes > 0 else None
     stopped = False
+    pulls: dict[tuple[str, str], dict[str, Any]] = {}
     for band, band_cfg in bands.items():
         band_target = band_targets[band]
         have_band = sum(v for (b, _), v in counts.items() if b == band)
@@ -519,10 +585,11 @@ def build(bucket: str, target: int, config: dict[str, Any], seed: int = 42, max_
             want = min(cap - counts[(band, spec["name"])], band_target - have_band)
             if want <= 0:
                 continue
-            got, stopped = pull_source(
+            got, stopped, stats = pull_source(
                 spec, want, bucket=bucket, band=band, out_path=out_path, existing_ids=existing_ids,
                 deduper=deduper, ctx=ctx, deadline=deadline,
             )
+            pulls[(band, spec["name"])] = {"accepted": got, **stats}
             counts[(band, spec["name"])] += got
             have_band += got
             if stopped:
@@ -532,7 +599,7 @@ def build(bucket: str, target: int, config: dict[str, Any], seed: int = 42, max_
 
     summary = summarise(read_jsonl(out_path, skip_bad_lines=True))
     summary.update({"bucket": bucket, "target": int(target), "band_targets": band_targets,
-                    "path": str(out_path), "stopped_by_time_budget": stopped})
+                    "path": str(out_path), "stopped_by_time_budget": stopped, "pulls": pulls})
     return summary
 
 
@@ -545,6 +612,20 @@ def print_summary(summary: dict[str, Any]) -> None:
     print(f"\n{'band':<10}{'source':<16}{'domain':<18}{'rows':>8}{'mean_words':>12}")
     for (band, source, domain), stats in summary["sources"].items():
         print(f"{band:<10}{source:<16}{domain:<18}{stats['rows']:>8}{stats['mean_words']:>12.1f}")
+    pulls = summary.get("pulls") or {}
+    if pulls:
+        print(f"\nthis run - documents read vs rejected\n{'band':<10}{'source':<16}{'seen':>8}{'kept':>8}"
+              f"{'rej%':>8}  reasons")
+        for (band, source), stats in pulls.items():
+            seen, kept = stats["seen"], stats["accepted"]
+            rejected = stats["rejected"]
+            total_rej = sum(rejected.values())
+            pct = 100.0 * total_rej / seen if seen else 0.0
+            reasons = ", ".join(f"{k} {v} ({100.0 * v / seen:.1f}%)" for k, v in
+                                sorted(rejected.items(), key=lambda kv: -kv[1])) or "none"
+            print(f"{band:<10}{source:<16}{seen:>8}{kept:>8}{pct:>7.1f}%  {reasons}")
+    else:
+        print("\nthis run - nothing pulled (already at target)")
     short = {b: t - summary["bands"].get(b, {}).get("rows", 0) for b, t in summary["band_targets"].items()}
     short = {b: n for b, n in short.items() if n > 0}
     if summary.get("stopped_by_time_budget"):

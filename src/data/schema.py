@@ -16,7 +16,7 @@ from typing import Any
 LANGUAGE_BUCKETS: tuple[str, ...] = ("en", "hi", "te", "cm")  # non-negotiable #1
 SPLITS: tuple[str, ...] = ("train", "cal", "test")
 ATTACK_TYPES: tuple[str, ...] = ("clean", "paraphrase", "back_translation", "hybrid")
-WRITER_L1_BANDS: tuple[str, ...] = ("general", "indian", "unknown")  # en: general (L1 proxy) vs indian (Indian-English, L2 proxy); hi/te/cm bands set in parts-plan Part 2-3
+WRITER_L1_BANDS: tuple[str, ...] = ("general", "indian", "native", "unknown")  # en: general (L1 proxy) vs indian (Indian-English, L2 proxy); hi/te/cm bands set in parts-plan Part 2-3
 
 LABEL_HUMAN: int = 0
 LABEL_MACHINE: int = 1

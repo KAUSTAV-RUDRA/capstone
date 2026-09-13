@@ -21,7 +21,7 @@ heldout_domain: null
 attack_types: [clean, paraphrase, back_translation, hybrid]
 
 # Writer L1/L2 bands for the fairness audit (T5).
-writer_l1_bands: [general, indian, unknown]   # en: general = L1 proxy, indian = Indian-English (L2 proxy)
+writer_l1_bands: [general, indian, native, unknown]   # en: general = L1 proxy, indian = Indian-English (L2 proxy); hi/te/cm: native
 
 # Per-sample schema (docs/project-context-master.md §6).
 schema_fields:
@@ -83,7 +83,51 @@ human_corpus:
               configs: [hi]               # English side of the en-hi pairs (10.1M rows)
               domain: news_gov_mixed
               provenance: "ai4bharat/samanantar v0.3 (2021), English side of en-hi pairs: shuffled sentences from Indian news / PIB / PMIndia <=2020, regrouped into passages; CC-BY-NC-4.0"
-    # Parts 2-3 add sources here (band names for hi/te/cm decided then).
-    hi: {bands: {unknown: {share: 1.0, sources: []}}}
-    te: {bands: {unknown: {share: 1.0, sources: []}}}
-    cm: {bands: {unknown: {share: 1.0, sources: []}}}
+    # hi / te: first-language writers, so a single band. IndicCorpV2 is the
+    # primary source and wikipedia is a pure fallback - it is only read if
+    # IndicCorpV2 cannot fill the target. `script` keeps the bucket
+    # monolingual, which per-language calibration depends on.
+    hi:
+      bands:
+        native:
+          share: 1.0
+          sources:
+            - name: indiccorp_v2
+              max_share: 1.0
+              split: hin_Deva           # NOT a per-language config: one config, language = split
+              max_docs: 120000          # only ~7% of docs yield a 120-300 word passage
+              script: deva
+              min_script_ratio: 0.8
+              domain: news_web
+              provenance: "ai4bharat/IndicCorpV2 (Doddapaneni et al., ACL 2023), split hin_Deva: crawled Indian news/web Hindi, crawl <=2022; CC-0"
+            - name: wikipedia
+              max_share: 1.0
+              config: 20231101.hi
+              max_page_id: 100000       # early-created articles (pre-2020 proxy)
+              script: deva
+              min_script_ratio: 0.8
+              domain: wiki_general
+              provenance: "wikimedia/wikipedia 20231101.hi, page id <= 100,000; CC-BY-SA-4.0"
+    te:
+      bands:
+        native:
+          share: 1.0
+          sources:
+            - name: indiccorp_v2
+              max_share: 1.0
+              split: tel_Telu
+              max_docs: 400000          # only ~2% of Telugu docs are long enough
+              script: telu
+              min_script_ratio: 0.8
+              domain: news_web
+              provenance: "ai4bharat/IndicCorpV2 (Doddapaneni et al., ACL 2023), split tel_Telu: crawled Indian news/web Telugu, crawl <=2022; CC-0"
+            - name: wikipedia
+              max_share: 1.0
+              config: 20231101.te
+              max_page_id: 100000
+              script: telu
+              min_script_ratio: 0.8
+              domain: wiki_general
+              provenance: "wikimedia/wikipedia 20231101.te, page id <= 100,000; CC-BY-SA-4.0"
+    # Part 3 adds cm sources (band: native, romanised Hinglish).
+    cm: {bands: {native: {share: 1.0, sources: []}}}
