@@ -5,6 +5,49 @@ Newest entries at the top.
 
 ---
 
+## 2026-09-13 — Part 3: cm human corpus + corpus card (human side complete)
+
+- **hi/te domain blend first:** IndicCorpV2 capped at `max_share: 0.75`, both
+  buckets rebuilt from scratch. Each is now 1,650 news_web + 550 wiki_general;
+  mean length rose to 175.6 (hi) and 170.3 (te). Commit `882c1cc`.
+- **cm** (`data/raw/human/cm.jsonl`): 2,200 rows, mean 55.2 words, median 25 —
+  COMI-LINGUA `TN` 1,175 (social comments), cmu_hinglish_dog 917 (chat), HinGE
+  108. Well past the >= 800 accept threshold. Script purity 1.000, zero
+  duplicates, zero residual artefacts.
+- **COMI-LINGUA is not Roman script, except in one config.** LID/MLI/NER/POS are
+  Devanagari code-mixing; only `TN` has Roman-script sentences, and its raw
+  `Sentences` column (not the annotator-normalised ones) is the authentic text.
+- **New machinery:** per-bucket `passage_words` override (cm is 15-300, not
+  120-300); a curated Romanised-Hindi function-word list with
+  `min_hindi_word_ratio: 0.3` as the cm gate; `code_mix_ratio` now carries that
+  measurement (median 0.39) instead of a hardcoded 0.0; `clean_informal`
+  normalises chat spacing rather than rejecting it, which recovered ~20 % of the
+  scarce pre-ChatGPT chat data.
+- **`docs/data/corpus_card.md` written** — per bucket: sources, licences,
+  counts, band split, domain split, mean/median length, cleaning stats, row
+  schema, ethics, and eight numbered limitations.
+- **Human corpus totals 8,800 passages**, 2,200 per bucket. Every bucket clears
+  the 1,000-passage calibration floor with >= 1,200 left for train/test.
+
+**Two things that need a decision before the tables are built.** cm averages
+55.2 words against 170-211 elsewhere and is internally bimodal, so a
+cross-bucket comparison confounds language with length; raising the floor to 50
+words would leave only the chat source (~900 rows, single domain). And
+COMI-LINGUA states no collection date, so machine text cannot be ruled out in
+53 % of cm — every other source in the corpus predates ChatGPT. Both are in
+`docs/decisions.md` and the corpus card's limitations.
+
+**Verify:** `.env\Scripts\python.exe tests\data	est_build_human_corpus.py`
+→ 14 × PASS (offline). Then
+`.env\Scripts\python.exe -m src.data.build_human_corpus --bucket cm --target 2200`
+→ prints the source table and `complete`; re-running is a no-op.
+
+**Next:** Part 4 — tokenizer fertility across mGPT / Qwen2.5-0.5B / gemma-2-2b,
+lock the scorer in `configs/models.yaml`, and build the three resumable CLIs
+(`generate`, `score`, `attack`).
+
+---
+
 ## 2026-09-13 — Part 2: hi and te human corpora (2,200 passages each)
 
 - Added `indiccorp_v2` to the loader registry and hi / te entries to

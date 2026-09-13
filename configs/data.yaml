@@ -131,5 +131,44 @@ human_corpus:
               min_script_ratio: 0.8
               domain: wiki_general
               provenance: "wikimedia/wikipedia 20231101.te, page id <= 100,000; CC-BY-SA-4.0"
-    # Part 3 adds cm sources (band: native, romanised Hinglish).
-    cm: {bands: {native: {share: 1.0, sources: []}}}
+    # cm: Romanised (Latin-script) Hindi-English code-mixing. Hinglish occurs as
+    # comments, chat turns and single sentences, so this bucket overrides the
+    # global passage length - a 120-word floor would reject nearly all of it.
+    # `min_hindi_word_ratio` is the bucket's real gate: it separates genuine
+    # code-mixing from the English-only rows that sit in the same source files,
+    # and its value is stored per row as `code_mix_ratio`.
+    cm:
+      passage_words: {min: 15, max: 300}
+      bands:
+        native:
+          share: 1.0
+          sources:
+            # Pre-ChatGPT sources first, so as much of the bucket as possible
+            # has provenance that rules out machine text (see decisions.md).
+            - name: hinge
+              max_share: 1.0
+              split: train
+              column: "Human-generated Hinglish"
+              script: latn
+              min_script_ratio: 0.9
+              min_hindi_word_ratio: 0.3
+              domain: hinglish_generation
+              provenance: "LingoIITGN/HinGE (Srivastava & Singh, 2021): human-written Hinglish for Hindi-English sentence pairs, pre-ChatGPT; CC-BY-4.0"
+            - name: cmu_hinglish_dog
+              max_share: 1.0
+              splits: [train, validation, test]
+              script: latn
+              min_script_ratio: 0.9
+              min_hindi_word_ratio: 0.3
+              domain: chat_dialogue
+              provenance: "festvox/cmu_hinglish_dog (Zhou et al. 2018; Hinglish version 2020): two-person chat about film articles, utterances joined per conversation, pre-ChatGPT; CC-BY-SA-3.0"
+            - name: comi_lingua
+              max_share: 1.0
+              config: TN              # the only Roman-script config; others are Devanagari
+              splits: [train, test]
+              column: Sentences       # raw comment, NOT the annotator-normalised columns
+              script: latn
+              min_script_ratio: 0.9
+              min_hindi_word_ratio: 0.3
+              domain: social_comments
+              provenance: "LingoIITGN/COMI-LINGUA (Sheth et al., 2025) TN config, raw Sentences: naturally-written Roman-script Hinglish social comments; collection date not stated, so post-2022 machine text cannot be ruled out; CC-BY-4.0"

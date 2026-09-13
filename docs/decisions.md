@@ -173,6 +173,42 @@ Indic dumps than in `20231101.en`. Both still filled their 550-row quota from
 936 (hi) and 1,263 (te) articles read, well inside the `max_page_id: 100000`
 window, so the pre-2020 proxy is not strained.
 
+## 2026-09-13 — Human corpus (Part 3): cm sources
+
+| Decision | Value | Why |
+|---|---|---|
+| cm sources | COMI-LINGUA `TN` config (1175), cmu_hinglish_dog (917), HinGE (108) | The only three openly-licensed Romanised Hinglish corpora of usable size. Ordered pre-ChatGPT first, so 47 % of the bucket has provenance that rules out machine text. |
+| COMI-LINGUA config | `TN` only, raw `Sentences` column | **The brief assumed COMI-LINGUA is Roman script; it is not.** LID/MLI/NER/POS carry *Devanagari* code-mixing, which does not belong in a Romanised bucket. Only `TN` has Roman-script sentences. The raw column is used rather than the annotator-normalised ones: normalisation is a third party's edit, and the unedited comment is the authentic human writing. |
+| cm passage length | 15-300 words (bucket override of the global 120-300) | Romanised Hinglish occurs as comments and chat turns. At a 120-word floor the whole bucket yields well under 800 rows. |
+| Code-mixing gate | `min_hindi_word_ratio: 0.3` against a curated Romanised Hindi **function-word** list | These sources all contain English-only rows that would otherwise land in the cm bucket. Function words carry the grammar, are a closed class, and romanise fairly stably. Forms colliding with English ("to", "is", "us", "me", "he", "main", "hi") are excluded, so English text scores ~0.00. |
+| `code_mix_ratio` | Populated from the same measurement | The schema field finally has a real value: min 0.30, median 0.39, p90 0.50, max 0.73. Zero in every other bucket. |
+| Informal spacing | Normalised (`clean_informal`), not rejected | `kaisa hai ?` is genuine informal typing, not corrupt text. Rejecting it cost ~20 % of the scarce pre-ChatGPT chat data; leaving it in would have been a shortcut feature no LLM reproduces. **`clean_artifacts.py` must apply the same normalisation to machine cm text.** |
+
+**Curated list over transliteration.** The brief allowed either. A list
+transliterated from the `hi` bucket would produce ITRANS-style forms
+(`kyonki`, `kiyaa`) that real Hinglish spells differently (`kyunki`, `kiya`),
+so recall would be poor where it matters. The curated list is ~200 function
+words with their common spelling variants side by side.
+
+**Result:** 2,200 rows, mean 55.2 words, median 25, script purity 1.000, zero
+duplicates, well above the >= 800 accept threshold.
+
+### The cm length problem — needs a decision before T1/T5
+
+`cm` averages 55.2 words against 170-211 for the other buckets, and is
+internally bimodal (chat 103 words, comments ~21). Curvature is strongly
+length-dependent, so comparing `cm` to `en` confounds language with length, and
+Part 13's length matching only equalises machine against human *within* a
+bucket. Raising the cm floor is not an escape: at 50 words only the chat source
+survives, giving ~900 rows and a single-domain bucket. The realistic options are
+to run a length-controlled sub-analysis for cm, or to caveat the cm row
+explicitly wherever it appears. Recorded rather than decided.
+
+**Also of note:** the Hindi function-word list detects Hindi-matrix code-mixing
+but not English-matrix. HinGE inserts Hindi *content* words into English
+sentences ("a part of vikas of the adhosanrachna"), scoring a median 0.18, so
+42 % of it was rejected and the bucket under-represents that mixing pattern.
+
 ---
 
 ## Decisions still open (fill as resolved)

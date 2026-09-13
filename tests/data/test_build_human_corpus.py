@@ -87,6 +87,48 @@ def test_wikipedia_prose_keeps_danda_sentences() -> None:
     assert bhc.wikipedia_prose(text) == "भारत एक देश है। यह प्राचीन है।"
 
 
+def test_hindi_word_ratio_separates_hinglish_from_english() -> None:
+    # Hindi-matrix Hinglish: function words are Hindi, content words English.
+    assert bhc.hindi_word_ratio("tumne konsi movie dekhi thi kal raat ko") > 0.3
+    assert bhc.hindi_word_ratio("Aapke madad se hum bahut kuch sikhe hain") > 0.3
+    # English-only must score near zero, or the cm gate would admit English text.
+    assert bhc.hindi_word_ratio("This is a perfectly ordinary English sentence about the movie") == 0.0
+    assert bhc.hindi_word_ratio("We are with you on this the worst and least way to do it") == 0.0
+    assert bhc.hindi_word_ratio("") == 0.0
+    # Devanagari-script Hindi scores zero: this gate is for ROMANISED Hindi only,
+    # and script_ratio is what keeps Devanagari out of the cm bucket.
+    assert bhc.hindi_word_ratio("यह एक हिंदी वाक्य है") == 0.0
+
+
+def test_clean_informal_normalises_chat_spacing() -> None:
+    assert bhc.clean_informal("kaisa hai ? bahut accha !") == "kaisa hai? bahut accha!"
+    assert not bhc.has_artefact(bhc.clean_informal("bhai yeh kya hai , batao na ?"))
+
+
+def test_bucket_can_override_passage_length() -> None:
+    # Each doc must be genuinely distinct or the MinHash filter drops it as a
+    # near-duplicate, which is what would happen with only an index varying.
+    bhc.SOURCE_LOADERS["fake_short"] = lambda spec, ctx: iter(
+        [bhc.RawDoc("fake_short", str(i),
+                    " ".join(f"tok{i}x{j}" for j in range(12)) + f" alpha{i} beta{i} gamma{i} delta{i}",
+                    "fake", "test") for i in range(40)]
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        config = {"human_corpus": {
+            "output_dir": tmp, "passage_words": {"min": 120, "max": 300},
+            "dedup": {"num_perm": 128, "threshold": 0.8, "shingle_words": 5},
+            "buckets": {"cm": {
+                "passage_words": {"min": 15, "max": 300},
+                "bands": {"native": {"share": 1.0, "sources": [{"name": "fake_short", "max_share": 1.0}]}},
+            }},
+        }}
+        summary = bhc.build("cm", 10, config)
+        assert summary["rows"] == 10, "the 15-word override should admit short cm text"
+        assert all(r["length_words"] >= 15 for r in
+                   [json.loads(l) for l in Path(tmp, "cm.jsonl").read_text(encoding="utf-8").splitlines()])
+    del bhc.SOURCE_LOADERS["fake_short"]
+
+
 def test_allocate_sums_to_target() -> None:
     assert bhc.allocate(2200, {"general": 0.5, "indian": 0.5}) == {"general": 1100, "indian": 1100}
     alloc = bhc.allocate(2201, {"a": 1, "b": 1, "c": 1})

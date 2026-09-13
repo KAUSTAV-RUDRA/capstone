@@ -62,6 +62,7 @@ _SENT_END_RE = re.compile(r"(?<=[.!?।॥])\s+")
 _LATIN_ALPHA_RE = re.compile(r"[A-Za-z]")
 _ANY_ALPHA_RE = re.compile(r"[^\W\d_]", re.UNICODE)
 _URL_TOKEN_RE = re.compile(r"\bURL_\d+\b")
+_WORD_RE = re.compile(r"[^\W\d_]+", re.UNICODE)  # word tokens: no digits, no punctuation
 _REPLACEMENT_CHAR = "�"
 # Surface artefacts that would make human text trivially separable from machine
 # text: LaTeX left by Wikipedia scrapes, wiki markup, placeholder tokens, and a
@@ -149,6 +150,21 @@ def detokenise_ptb(text: str) -> str:
     return repair_holes(text)                                    # "( URL_0 )" -> "( )" -> gone
 
 
+def clean_informal(text: str) -> str:
+    """Normalise spacing in social / chat text (``kaisa hai ?`` -> ``kaisa hai?``).
+
+    Informal writing genuinely contains a space before punctuation, so unlike a
+    scraped template hole this is not corrupt text. It is normalised rather than
+    rejected for two reasons: it would otherwise cost ~20 % of the scarce
+    pre-ChatGPT chat data, and a typing habit no LLM reproduces would act as a
+    shortcut feature that inflates every AUROC.
+
+    NOTE: ``clean_artifacts.py`` must apply this same normalisation to machine
+    ``cm`` text, or the asymmetry becomes a shortcut in the other direction.
+    """
+    return detokenise_ptb(text)
+
+
 def fix_sentence_spacing(text: str) -> str:
     """Insert the missing space in ``...449 BC.In 494 BC...`` (HC3 open_qa)."""
     return re.sub(r"([.!?])([A-Z][a-z])", r"\1 \2", text)
@@ -219,6 +235,52 @@ def samanantar_sentence_ok(sentence: str) -> bool:
         if capitalised / len(words) > 0.5:
             return False  # Title Case headline
     return True
+
+
+# Romanised Hindi function words, for measuring how much Hindi is in a Latin-script
+# code-mixed passage. Function words are used rather than content words because
+# they carry the grammar (so their share tracks the matrix language), they are a
+# closed class, and their romanisation is comparatively stable. Common spelling
+# variants are listed side by side (hai/hain/he, nahi/nahin, mein/me/mai).
+# Forms that are also ordinary English words are deliberately LEFT OUT ("to",
+# "is", "us", "me", "he", "main", "the", "in", "so", "do", "hi", "an", "at"),
+# so English-only text scores near zero and the ratio stays a Hindi signal.
+HINDI_ROMAN_WORDS: frozenset[str] = frozenset("""
+hai hain hoon hun hota hoti hote hua hui hue tha thi thay
+ka ke ki ko se kaa kee kii koi kuch kuchh sab sabhi
+aur ya kyunki kyuki kyonki lekin magar par phir fir toh bhi
+nahi nahin nahiin naa nai mat bina
+kya kyun kyon kaise kaisa kaisi kab kahan kahaan kidhar kitna kitne kitni
+jo joh wo woh vo ye yeh yah vah inko unko iska uska inka unka isko
+apna apne apni khud
+hum ham hamara hamare humara tum tumhara tumhe tumne aap aapka aapke aapki aapko
+mera meri mere tera teri tere uske uski unke unki mein
+mujhe mujhko humein hamein tumko usko
+karna karne karta karti karte kiya kiye kar karo kare karen karunga karenge
+raha rahi rahe rahna rahta rahti
+gaya gayi gaye gya jana jata jati jate
+diya diye dena dete deta lena liya lete leta
+hona hone jaise agar warna varna
+bahut bohot bohut thoda zyada jyada achha acha accha achhi theek thik sahi galat
+saath sath baad pehle pahle abhi kal aaj andar bahar upar niche
+yaar bhai behen dost matlab bas arre haan haa
+chahiye chahta chahti chahte milega milta mila
+dekh dekha dekhna dekhte suna sunna bol bola bolna keh kaha kehna
+samajh samjha pata malum
+""".split())
+
+
+def hindi_word_ratio(text: str) -> float:
+    """Fraction of word tokens that are Romanised Hindi function words (0.0-1.0).
+
+    This is the ``cm`` bucket's gate and also fills ``code_mix_ratio``: it
+    separates genuine Hinglish from the English-only and Devanagari-only rows
+    that sit in the same source files.
+    """
+    tokens = _WORD_RE.findall(text.lower())
+    if not tokens:
+        return 0.0
+    return sum(1 for t in tokens if t in HINDI_ROMAN_WORDS) / len(tokens)
 
 
 def allocate(target: int, shares: dict[str, float]) -> dict[str, int]:
@@ -429,11 +491,104 @@ def iter_indiccorp_v2(spec: dict[str, Any], ctx: LoaderContext) -> Iterator[RawD
         )
 
 
+def iter_comi_lingua(spec: dict[str, Any], ctx: LoaderContext) -> Iterator[RawDoc]:
+    """LingoIITGN/COMI-LINGUA (CC-BY-4.0), ``TN`` config: naturally-written Hinglish.
+
+    The ``TN`` (transliteration-normalisation) config is the only one whose
+    ``Sentences`` column is Roman script - LID/MLI/NER/POS carry Devanagari
+    code-mixing instead, which does not belong in a Romanised ``cm`` bucket.
+    The RAW ``Sentences`` column is used, not the annotator-normalised columns:
+    normalisation is an edit by a third party, and the unedited comment is the
+    authentic human writing this corpus is supposed to represent.
+    """
+    from datasets import load_dataset
+
+    config = spec.get("config", "TN")
+    column = spec.get("column", "Sentences")
+    for split in spec.get("splits", ["train", "test"]):
+        ds = load_dataset(spec.get("repo", "LingoIITGN/COMI-LINGUA"), config, split=split)
+        for i, row in enumerate(ds):
+            text = normalise_ws(row.get(column) or "")
+            if text:
+                yield RawDoc(
+                    source=spec["name"], source_id=f"{config}:{split}:{i}", text=clean_informal(text),
+                    domain=spec.get("domain", "social_comments"),
+                    provenance=spec.get("provenance", "comi_lingua"), prechunked=True,
+                )
+
+
+def iter_hinge(spec: dict[str, Any], ctx: LoaderContext) -> Iterator[RawDoc]:
+    """LingoIITGN/HinGE (CC-BY-4.0): human-written Hinglish for Hindi-English pairs.
+
+    ``Human-generated Hinglish`` holds a *stringified Python list* of several
+    human variants per source sentence. They paraphrase one another, so only the
+    longest is taken - the rest would be near-duplicates that the MinHash filter
+    would drop anyway.
+    """
+    import ast
+
+    from datasets import load_dataset
+
+    column = spec.get("column", "Human-generated Hinglish")
+    ds = load_dataset(spec.get("repo", "LingoIITGN/HinGE"), split=spec.get("split", "train"))
+    for i, row in enumerate(ds):
+        raw = row.get(column)
+        if not raw:
+            continue
+        try:
+            variants = ast.literal_eval(raw) if isinstance(raw, str) else list(raw)
+        except (ValueError, SyntaxError):
+            continue
+        variants = [normalise_ws(v) for v in variants if isinstance(v, str) and v.strip()]
+        if not variants:
+            continue
+        yield RawDoc(
+            source=spec["name"], source_id=str(i), text=clean_informal(max(variants, key=n_words)),
+            domain=spec.get("domain", "hinglish_generation"),
+            provenance=spec.get("provenance", "hinge"), prechunked=True,
+        )
+
+
+def iter_cmu_hinglish_dog(spec: dict[str, Any], ctx: LoaderContext) -> Iterator[RawDoc]:
+    """festvox/cmu_hinglish_dog (CC-BY-SA-3.0): Hinglish chat about Wikipedia film docs.
+
+    Rows are single utterances, most far under the length floor, so consecutive
+    utterances of one conversation are joined into a transcript. Conversations
+    are delimited by ``(date, docIdx, user2_id)`` changing.
+    """
+    from datasets import load_dataset
+
+    buf: list[str] = []
+    key: tuple[Any, ...] | None = None
+    start = 0
+    for split in spec.get("splits", ["train", "validation", "test"]):
+        ds = load_dataset(spec.get("repo", "festvox/cmu_hinglish_dog"), split=split)
+        for i, row in enumerate(ds):
+            this_key = (split, row.get("date"), row.get("docIdx"), row.get("user2_id"))
+            utterance = normalise_ws((row.get("translation") or {}).get("hi_en") or "")
+            if this_key != key:
+                if buf:
+                    yield RawDoc(spec["name"], f"{key[0]}:{start}-{i - 1}", clean_informal(" ".join(buf)),
+                                 spec.get("domain", "chat_dialogue"),
+                                 spec.get("provenance", "cmu_hinglish_dog"), True)
+                buf, key, start = [], this_key, i
+            if utterance:
+                buf.append(utterance)
+        if buf:
+            yield RawDoc(spec["name"], f"{split}:{start}-end", clean_informal(" ".join(buf)),
+                         spec.get("domain", "chat_dialogue"),
+                         spec.get("provenance", "cmu_hinglish_dog"), True)
+            buf, key = [], None
+
+
 SOURCE_LOADERS: dict[str, Callable[[dict[str, Any], LoaderContext], Iterator[RawDoc]]] = {
     "hc3": iter_hc3,
     "wikipedia": iter_wikipedia,
     "samanantar_en": iter_samanantar_en,
     "indiccorp_v2": iter_indiccorp_v2,
+    "comi_lingua": iter_comi_lingua,
+    "hinge": iter_hinge,
+    "cmu_hinglish_dog": iter_cmu_hinglish_dog,
 }
 
 # ---------------------------------------------------------------------------
@@ -442,13 +597,14 @@ SOURCE_LOADERS: dict[str, Callable[[dict[str, Any], LoaderContext], Iterator[Raw
 _ID_SAFE_RE = re.compile(r"[^\w:.\-]", re.UNICODE)
 
 
-def make_row(bucket: str, band: str, doc: RawDoc, passage: str, row_id: str) -> dict[str, Any]:
+def make_row(bucket: str, band: str, doc: RawDoc, passage: str, row_id: str,
+             code_mix_ratio: float = 0.0) -> dict[str, Any]:
     return {
         "id": row_id,
         "text": passage,
         "label": LABEL_HUMAN,
         "language": bucket,
-        "code_mix_ratio": 0.0,
+        "code_mix_ratio": round(code_mix_ratio, 4),
         "generator": None,
         "domain": doc.domain,
         "length_words": n_words(passage),
@@ -481,6 +637,8 @@ def pull_source(
     name = spec["name"]
     script = spec.get("script")
     min_script = float(spec.get("min_script_ratio", 0.8))
+    min_hindi = spec.get("min_hindi_word_ratio")
+    min_hindi = float(min_hindi) if min_hindi is not None else None
     loader = SOURCE_LOADERS.get(spec.get("loader", name))
     if loader is None:
         raise KeyError(f"no loader registered for source '{name}' (known: {sorted(SOURCE_LOADERS)})")
@@ -504,10 +662,17 @@ def pull_source(
             if script and script_ratio(passage, script) < min_script:
                 rejected["wrong_script"] += 1
                 continue
+            cm_ratio = 0.0
+            if min_hindi is not None:
+                cm_ratio = hindi_word_ratio(passage)
+                if cm_ratio < min_hindi:
+                    rejected["not_code_mixed"] += 1
+                    continue
             if not deduper.check_and_add(row_id, passage):
                 rejected["near_duplicate"] += 1
                 continue
-            fh.write(json.dumps(make_row(bucket, band, doc, passage, row_id), ensure_ascii=False) + "\n")
+            fh.write(json.dumps(make_row(bucket, band, doc, passage, row_id, cm_ratio),
+                                ensure_ascii=False) + "\n")
             fh.flush()
             existing_ids.add(row_id)
             accepted += 1
@@ -558,8 +723,12 @@ def build(bucket: str, target: int, config: dict[str, Any], seed: int = 42, max_
     if not any(b.get("sources") for b in bands.values()):
         raise KeyError(f"no sources configured for bucket '{bucket}' yet (see docs/parts-plan.md)")
 
-    words = hc.get("passage_words", {})
+    # Passage length is global unless the bucket overrides it. cm must override:
+    # Romanised Hinglish occurs as comments, chat turns and single sentences,
+    # and a 120-word floor would reject essentially all of it.
+    words = {**hc.get("passage_words", {}), **(bucket_cfg.get("passage_words") or {})}
     ctx = LoaderContext(int(words.get("min", 120)), int(words.get("max", 300)), int(seed))
+    log.info("[%s] passage length %d-%d words", bucket, ctx.min_words, ctx.max_words)
     out_path = ensure_dir(hc.get("output_dir", "data/raw/human")) / f"{bucket}.jsonl"
 
     existing = read_jsonl(out_path, skip_bad_lines=True) if out_path.exists() else []
