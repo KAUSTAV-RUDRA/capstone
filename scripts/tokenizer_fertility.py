@@ -28,13 +28,20 @@ import random
 import sys
 from pathlib import Path
 
-# Tokenizer-only: gemma-2-2b and Llama-3.1-8B are gated and skipped without a
-# HF token, which is expected and not an error.
+# Tokenizer-only: gated repos are skipped without a HF token and an accepted
+# licence, which is expected and not an error.
 DEFAULT_MODELS: tuple[str, ...] = (
     "ai-forever/mGPT",
     "Qwen/Qwen2.5-0.5B",
     "google/gemma-2-2b",
     "meta-llama/Llama-3.1-8B",
+    # Generator tokenizers (configs/data.yaml machine_corpus.generators): their
+    # fertility sets each generator's token budget in src/data/generate.py.
+    "Qwen/Qwen2.5-7B-Instruct",
+    "google/gemma-2-9b-it",
+    "mistralai/Mistral-7B-Instruct-v0.3",
+    "meta-llama/Llama-3.1-8B-Instruct",
+    "microsoft/Phi-3.5-mini-instruct",
 )
 BUCKETS: tuple[str, ...] = ("en", "hi", "te", "cm")
 
@@ -73,9 +80,27 @@ def measure(tokenizer, texts: list[str]) -> dict[str, float]:
     }
 
 
-def run(models: list[str], human_dir: Path, out_path: Path, n: int, seed: int) -> list[dict]:
-    from transformers import AutoTokenizer
+def load_tokenizer(model: str):
+    """AutoTokenizer, or the repo's own tokenizer.json when transformers asks for sentencepiece.
 
+    Mistral-7B-Instruct-v0.3's config sends AutoTokenizer through a slow
+    sentencepiece conversion. sentencepiece is not in requirements.txt, and the
+    fast tokenizer.json shipped in the same repo loads without it.
+    """
+    from transformers import AutoTokenizer, PreTrainedTokenizerFast
+
+    try:
+        return AutoTokenizer.from_pretrained(model)
+    except ValueError as exc:
+        if "sentencepiece" not in str(exc):
+            raise
+        from huggingface_hub import hf_hub_download
+
+        print("  (sentencepiece not installed - loading tokenizer.json directly)")
+        return PreTrainedTokenizerFast(tokenizer_file=hf_hub_download(model, "tokenizer.json"))
+
+
+def run(models: list[str], human_dir: Path, out_path: Path, n: int, seed: int) -> list[dict]:
     passages = {b: load_passages(human_dir, b, n, seed) for b in BUCKETS}
     for bucket, texts in passages.items():
         if not texts:
@@ -87,7 +112,7 @@ def run(models: list[str], human_dir: Path, out_path: Path, n: int, seed: int) -
     for model in models:
         print(f"\n[{model}]")
         try:
-            tokenizer = AutoTokenizer.from_pretrained(model)
+            tokenizer = load_tokenizer(model)
         except Exception as exc:  # noqa: BLE001 - gated/offline repos must not fail the run
             reason = type(exc).__name__
             gated = any(k in str(exc).lower() for k in ("gated", "awaiting", "401", "403", "authorized"))

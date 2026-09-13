@@ -5,7 +5,7 @@ Rule for every part: Claude Code in normal (not auto) mode unless the part says 
 Three commands do most of the heavy lifting. **Part 4 builds them once**; later parts just run them. Each writes progress to disk continuously and stops itself at `--max-minutes`. Re-running the same command resumes.
 
 ```
-python -m src.data.generate --generator <name> --buckets en,hi,te,cm --fraction 1.0 --max-minutes 110
+python -m src.data.generate --generator <qwen7b|gemma|mistral|llama|phi> --buckets en,hi,te,cm --max-minutes 110
 python -m src.eval.score    --column <name> --max-minutes 110
 python -m src.data.attack   --attack <paraphrase|backtranslation|hybrid> --max-minutes 110
 ```
@@ -86,19 +86,39 @@ Done when: fertility CSV exists; generate dry-run resumes correctly.
 ---
 
 ## STAGE 3 — MACHINE TEXT  (Parts 5–12, each ≤ 2 h, GPU)
-Every part is the same command; you run it until it prints "complete". If it stops at 110 minutes, that's one part; run it again next sitting — that's the next part. Log in to HuggingFace first (`huggingface-cli login`) and accept the Llama-3.1, Gemma-2 and Mistral licences on their model pages, or fallbacks kick in.
+Every part is the same command; you run it until it prints "complete". If it stops at 110 minutes, that's one part; run it again next sitting — that's the next part. Generation runs on local **Ollama**, Q4_K_M for all five generators (docs/decisions.md 2026-09-13 "Machine text").
 
-| Part | Command | Expected sittings |
-|---|---|---|
-| 5–6 | `python -m src.data.generate --generator Qwen/Qwen2.5-7B-Instruct --buckets en,hi,te,cm --fraction 1.0 --max-minutes 110` | 2 |
-| 7–8 | `... --generator google/gemma-2-9b-it ...` (gated → google/gemma-2-2b-it) | 2 |
-| 9–10 | `... --generator mistralai/Mistral-7B-Instruct-v0.3 ...` (gated → HuggingFaceH4/zephyr-7b-beta) | 2 |
-| 11 | `... --generator meta-llama/Llama-3.1-8B-Instruct --fraction 0.6 ...` (gated → NousResearch/Meta-Llama-3.1-8B-Instruct → HuggingFaceTB/SmolLM2-1.7B-Instruct) | 1–2 |
-| 12 | `... --generator microsoft/Phi-3.5-mini-instruct --fraction 0.6 ...` | 1 |
+**One-time setup**
+```
+setx OLLAMA_NUM_PARALLEL 4               # then Quit Ollama from the tray and reopen it
+                                         # check: %LOCALAPPDATA%\Ollama\server.log shows OLLAMA_NUM_PARALLEL:4
+ollama pull qwen2.5:7b-instruct
+ollama pull gemma2:9b-instruct-q4_K_M
+ollama pull mistral:7b-instruct
+ollama pull llama3.1:8b-instruct-q4_K_M
+ollama pull phi3.5:3.8b-mini-instruct-q4_K_M
+python scripts/tokenizer_fertility.py    # fertility of each generator's tokenizer -> its token budget
+```
 
-Tell Claude Code: "Run this command. If a model is gated, use the fallback listed in docs/parts-plan.md and note it in docs/decisions.md. When it exits, tell me done-of-total." Commit after each sitting.
+**Who generates what.** Each human passage gets exactly one seen generator (`sha256(prompt_id) mod 3`), so each seen run covers about a third of every bucket. The two held-out generators each take a disjoint 30 % slice from a second hash and are test only. No `--fraction`: the assignment sets the size. Generator aliases, Ollama tags and HF fallbacks live in `configs/data.yaml` under `machine_corpus.generators`.
 
-Done when: all five `data/raw/machine/*.jsonl` files report "complete".
+**Token budget.** `num_predict = requested words x fertility(bucket) x 1.3 + 64`, capped at 2048. Rows that still hit it carry `truncated: true` for Part 13.
+
+| Part | Command | Role | Prompts |
+|---|---|---|---|
+| 5–6 | `python -m src.data.generate --generator qwen7b --buckets en,hi,te,cm --max-minutes 110` | seen | 2,874 |
+| 7–8 | `... --generator gemma ...` | seen | 2,997 |
+| 9–10 | `... --generator mistral ...` | seen | 2,929 |
+| 11 | `... --generator llama ...` | held-out | 2,727 |
+| 12 | `... --generator phi ...` | held-out | 2,605 |
+
+Sittings per generator are re-projected from each first run: every batch logs tokens/sec and effective concurrency (`x1.0` means the server is not running 4 slots; fix the setup, then resume).
+
+**Fallback.** If Ollama cannot serve a generator: `--backend hf [--model <hf id>]` (transformers + bitsandbytes 4-bit). It replaces that generator's whole file; generate.py refuses to append to a file another backend wrote. Note it in docs/decisions.md.
+
+Tell Claude Code: "Run this command. When it exits, tell me tokens/sec and done-of-total." Commit after each sitting.
+
+Done when: all five `data/raw/machine/<alias>.jsonl` files report "complete".
 
 ---
 

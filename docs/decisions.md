@@ -307,6 +307,112 @@ that did run.
 
 ---
 
+## 2026-09-13 — Machine text: Ollama backend, one seen generator per passage, fertility-aware budget
+
+**Why.** The first Stage 3 run (`Qwen/Qwen2.5-7B-Instruct`, transformers +
+bitsandbytes nf4, batch 8, RTX 4060 laptop at 88 of 90 W) managed 0.12–0.13
+passages/s, about 26 kept tokens/s. The GPU was 75–97 % busy and Python used
+one core, so the limit is per-token nf4 dequantisation, not idle hardware.
+Projected: ~32 h for one generator over 8,800 prompts, ~18 sittings against the
+2 planned. The same run exposed a budget bug: `words x 4 + 64` new tokens cut
+every hi and te passage short, because Qwen needs 4.8 tokens per Hindi word and
+11.9 per Telugu word. Its 72 rows (en only) were deleted so that no generator
+file mixes quantisations. Supersedes the 2026-09-02 seen/held-out generator rows.
+
+### 1. Ollama is the generation backend; HF stays as fallback
+
+- `src/data/generate.py --backend ollama` (default) posts to `/api/generate`
+  with `stream=false` and 4 concurrent requests from a thread pool. The server
+  only runs them in parallel with `OLLAMA_NUM_PARALLEL=4`: `setx
+  OLLAMA_NUM_PARALLEL 4`, then quit and reopen the desktop app; `server.log`
+  prints `OLLAMA_NUM_PARALLEL:4` when it took effect. Every batch logs tokens/s
+  and the effective concurrency (summed decode time / wall time), so a server
+  that is queueing shows up as `x1.0` within one batch.
+- `--backend hf` (transformers + bitsandbytes 4-bit) is for a generator Ollama
+  cannot serve. It replaces a generator wholesale: generate.py refuses to
+  append to a file written by another backend or model.
+- stdlib `urllib` only, so no new dependency. Per-request seed =
+  `sha256(seed:id)`.
+
+### 2. Quantisation: Q4_K_M for all five generators
+
+Tags resolved against `registry.ollama.ai` on 2026-09-13:
+
+| alias | requested tag | tag used | quant | size | model blob |
+|---|---|---|---|---|---|
+| qwen7b | `qwen2.5:7b-instruct` | same | Q4_K_M | 4.68 GB | `2bada8a74506` |
+| gemma | `gemma2:9b` | `gemma2:9b-instruct-q4_K_M` | Q4_K_M | 5.76 GB | `cb654129f57b` |
+| mistral | `mistral:7b-instruct` | same (= v0.3-q4_K_M) | Q4_K_M | 4.37 GB | `f5074b1221da` |
+| llama | `llama3.1:8b-instruct` | `llama3.1:8b-instruct-q4_K_M` | Q4_K_M | 4.92 GB | `667b0c1932bc` |
+| phi | `phi3.5:3.8b` | `phi3.5:3.8b-mini-instruct-q4_K_M` | Q4_K_M | 2.39 GB | `3ef532675b66` |
+
+`gemma2:9b` and `phi3.5:3.8b` resolve to **Q4_0**, and `llama3.1:8b-instruct`
+does not exist (404), so those three use explicit Q4_K_M tags. The whole point
+of the switch is one quantisation throughout. Every row records
+`decoding.quantization` (from `/api/show`) and the model digest.
+
+**For the paper (limitations):** the corpus is 4-bit K-quant output, not fp16
+or API output. It is the same for seen and held-out generators, so it is not a
+seen-vs-held-out confound, but transfer to unquantised or commercial generators
+is untested.
+
+**Gemma VRAM, expected:** 5.76 GB of weights plus KV cache for 4 slots x 3,072
+tokens (~2.1 GB at 42 layers x 8 KV heads x 256 dims) exceeds 8 GB, so Ollama
+will offload layers to CPU. Check its first batches; if concurrency collapses,
+lower `parallel` or `num_ctx` for that run.
+
+### 3. Assignment: one seen generator per human passage; held-out 30 % slices
+
+- **Seen:** `sha256(prompt_id) mod 3` → qwen7b / gemma / mistral. Python's
+  `hash()` is salted per process, so it would reshuffle the assignment each run.
+  On the 8,800-passage corpus: qwen7b 2,874, gemma 2,997, mistral 2,929 (sums to
+  8,800; each bucket 701–790 per generator).
+- **Held-out:** an independent `sha256("heldout:" + prompt_id)` mapped to [0, 1):
+  below 0.30 → llama, 0.30–0.60 → phi, else none. Disjoint by construction and
+  spread evenly across the three seen generators: llama 2,727, phi 2,605. Test
+  only; `configs/data.yaml heldout_generators: [llama, phi]`.
+- **Why:** every human passage gets exactly one seen machine counterpart, so
+  human : seen-machine is 1:1 per bucket with prompt-matched pairs intact, and
+  seen generation costs 8,800 calls instead of 26,400.
+- **Carry into Part 13:** a held-out passage shares its prompt with one seen
+  machine passage and one human passage. `freeze_splits` should keep each
+  `prompt_id` group inside one split, so a topic never sits in train on one side
+  and test on the other. Decide there.
+
+### 4. Token budget: `requested words x fertility(bucket) x 1.3 + 64`, cap 2048
+
+Fertility is each generator's own tokenizer (tokenizer-only downloads; all five
+official repos are accessible to this HF account). Mistral loads from its
+`tokenizer.json`, because AutoTokenizer asks for sentencepiece, which is not in
+`requirements.txt`. The Qwen2.5 row is the fallback for a generator without
+rows. `results/tokenizer_fertility.csv` is regenerated with them; the mGPT and
+Qwen2.5-0.5B rows reproduce exactly, so the scorer lock is untouched.
+
+| tokens per word | en | hi | te | cm |
+|---|---|---|---|---|
+| Qwen2.5-7B-Instruct (qwen7b) | 1.339 | 4.804 | 11.919 | 1.672 |
+| gemma-2-9b-it (gemma) | 1.297 | 2.023 | 4.942 | 1.506 |
+| Mistral-7B-Instruct-v0.3 (mistral) | 1.460 | 5.359 | 13.309 | 1.889 |
+| Llama-3.1-8B-Instruct (llama) | 1.306 | 2.706 | 13.819 | 1.651 |
+| Phi-3.5-mini-instruct (phi) | 1.495 | 5.562 | 20.286 | 1.908 |
+
+The previously gated gemma-2-2b row now measures too (same tokenizer as
+gemma-2-9b-it). It fragments Indic text less than mGPT, but at 2.6B params it
+is above the 2B cap (non-negotiable #5), so it is not a scorer candidate.
+
+**The cap still binds on Telugu.** Budgets clipped at 2,048: qwen7b te 647 of
+712, mistral te 650 + hi 42, llama te 624, phi te 687 + hi 33, gemma none. A
+clipped budget is not automatically a cut passage, since the model stops when
+it is done. Real cuts are recorded per row as `done_reason == "length"` /
+`truncated`. At exactly the requested length, 2,048 tokens hold about 170 Telugu
+words for Qwen and about 100 for Phi, so Qwen's te requests of 200–300 words (754 of
+2,200 human te passages) and almost all of Phi's te will be cut. Part 13 drops
+or length-matches truncated rows; if te machine counts fall too low, the lever
+is a larger te cap with `num_ctx` raised to match (3,072 now covers the longest
+prompt, ~860 tokens for Phi te, plus 2,048).
+
+---
+
 ## Decisions still open (fill as resolved)
 
 - [ ] Phase 0.1 — what "patent" means (disclosure / IPR-cell / IPO provisional).
@@ -315,4 +421,5 @@ that did run.
 - [x] Head C — **included**; 7.9956 GiB card vs a 7.5 GiB gate (2026-09-13, above).
 - [ ] Fusion — logistic vs GBM, decided on calibration AUROC.
 - [ ] Paper venue — ICON / IEEE-Springer / journal fallback.
-- [ ] Held-out generators — the two names to put in `configs/*.yaml`.
+- [x] Held-out generators — **llama** (`llama3.1:8b-instruct-q4_K_M`) and **phi**
+  (`phi3.5:3.8b-mini-instruct-q4_K_M`), disjoint 30 % slices (2026-09-13, above).
