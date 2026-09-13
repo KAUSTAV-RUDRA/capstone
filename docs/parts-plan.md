@@ -112,7 +112,7 @@ python scripts/tokenizer_fertility.py    # fertility of each generator's tokeniz
 | 11 | `... --generator llama ...` | held-out | 2,727 |
 | 12 | `... --generator phi ...` | held-out | 2,605 |
 
-Sittings per generator are re-projected from each first run: every batch logs tokens/sec and effective concurrency (`x1.0` means the server is not running 4 slots; fix the setup, then resume).
+Sittings per generator are re-projected from each first run. Four worker threads keep the server's 4 slots busy, and every 8 completed requests log tokens/sec and effective concurrency: about `x4` is the target; `x1.0` means the server is not running 4 slots, so fix the setup, then resume.
 
 **Fallback.** If Ollama cannot serve a generator: `--backend hf [--model <hf id>]` (transformers + bitsandbytes 4-bit). It replaces that generator's whole file; generate.py refuses to append to a file another backend wrote. Note it in docs/decisions.md.
 

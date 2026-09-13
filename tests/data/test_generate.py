@@ -11,7 +11,7 @@ import tempfile
 from pathlib import Path
 
 from src.data import generate
-from src.utils import modelload
+from src.utils import modelload, resumable
 from src.utils.config import load_config
 
 DATA_CONFIG = Path(__file__).resolve().parents[2] / "configs" / "data.yaml"
@@ -161,37 +161,39 @@ def _items(n: int) -> list[dict]:
              "num_predict": 64 if i == 0 else 200} for i in range(n)]
 
 
-def _processor(client: FakeOllama):
-    return generate.make_ollama_processor(
+def _worker(client: FakeOllama):
+    return generate.make_ollama_worker(
         client, "qwen7b", "seen", "qwen2.5:7b-instruct", {"quantization": "Q4_K_M", "digest": "abc"},
-        temperature=0.8, top_p=0.95, num_ctx=3072, keep_alive="1m", parallel=4, seed=42, retry_wait_s=0)
+        temperature=0.8, top_p=0.95, num_ctx=3072, keep_alive="1m", seed=42, retry_wait_s=0)
 
 
-def test_ollama_batch_sends_per_passage_budgets_and_records_truncation() -> None:
+def test_ollama_worker_sends_the_passage_budget_and_records_truncation() -> None:
     client = FakeOllama()
-    process = _processor(client)
-    rows = process(_items(8))
-    assert [r["id"] for r in rows] == [f"qwen7b__p{i}" for i in range(8)]   # batch order kept
-    assert sorted(c["num_predict"] for c in client.calls) == [64] + [200] * 7
+    process = _worker(client)
+    rows = [process(item) for item in _items(2)]
+    assert [c["num_predict"] for c in client.calls] == [64, 200]
+    assert client.calls[0]["seed"] != client.calls[1]["seed"]              # seeded per passage
     assert rows[0]["truncated"] is True and rows[1]["truncated"] is False
     row = rows[1]
     assert row["text"] == "machine text" and row["generator"] == "qwen7b" and row["backend"] == "ollama"
     assert row["generator_model"] == "qwen2.5:7b-instruct" and row["decoding"]["quantization"] == "Q4_K_M"
     assert row["prompt_id"] == "p1" and row["gen_tokens"] == 10
-    assert process.meter.tokens == 80
+    assert process.meter.tokens == 20
 
 
-def test_ollama_batch_keeps_good_rows_when_one_request_fails() -> None:
-    client = FakeOllama(fail=("p3",))
-    rows = _processor(client)(_items(8))
-    assert len(rows) == 7 and "qwen7b__p3" not in {r["id"] for r in rows}
-    assert len(client.calls) == 9                    # the failing request was retried once
-    try:
-        _processor(FakeOllama(fail=tuple(f"p{i}" for i in range(8))))(_items(8))
-    except RuntimeError:
-        pass
-    else:
-        raise AssertionError("a batch where every request fails must raise")
+def test_ollama_run_writes_each_row_and_leaves_a_failed_request_for_resume() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "qwen7b.jsonl"
+        client = FakeOllama(fail=("p3",))
+        report = resumable.run_concurrent(_items(8), id_of=lambda i: i["id"], process_item=_worker(client),
+                                          out_path=out, workers=4)
+        assert report.processed == 7 and report.failed == 1 and not report.complete
+        assert len(client.calls) == 9                    # the failing request was retried once
+        written = [json.loads(line)["id"] for line in out.read_text(encoding="utf-8").splitlines()]
+        assert len(written) == 7 and "qwen7b__p3" not in written
+        again = resumable.run_concurrent(_items(8), id_of=lambda i: i["id"], process_item=_worker(FakeOllama()),
+                                         out_path=out, workers=4)
+        assert again.already_done == 7 and again.processed == 1 and again.complete
 
 
 def test_refuses_to_append_to_a_file_from_another_backend() -> None:

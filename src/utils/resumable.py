@@ -7,21 +7,28 @@ here once:
 * **Resumable** - the output file is the progress record. On start the ids
   already present are read back and skipped, so re-running the same command
   continues rather than restarting or duplicating.
-* **Crash-safe** - results are appended after every batch and flushed, so a
-  kill -9 loses at most one batch.
-* **Time-boxed** - ``--max-minutes`` stops cleanly between batches and prints
-  how far it got, so a run fits in one sitting.
+* **Crash-safe** - results are appended and flushed as they complete, so a
+  kill -9 loses at most one batch (or the requests in flight).
+* **Time-boxed** - ``--max-minutes`` stops cleanly and prints how far it got,
+  so a run fits in one sitting.
+
+Two runners share those semantics. :func:`run_resumable` processes batches, for
+work that is itself batched on a local GPU. :func:`run_concurrent` keeps a
+persistent pool of worker threads, for one blocking call per item against a
+server with parallel slots (Ollama), so no slot idles waiting for a batch.
 
 The unit of work is an item with an ``id``. What the id means differs per CLI
 (a prompt for generate, a row for score), which is why the caller supplies both
-the id function and the batch processor.
+the id function and the processor.
 
-Serves docs/parts-plan.md Part 4.
+Serves docs/parts-plan.md Part 4 and Stage 3.
 """
 from __future__ import annotations
 
 import json
 import logging
+import queue
+import threading
 import time
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
@@ -78,7 +85,7 @@ def batched(items: Sequence[T], size: int) -> Iterable[Sequence[T]]:
 
 @dataclass
 class RunReport:
-    """Outcome of one :func:`run_resumable` call."""
+    """Outcome of one :func:`run_resumable` or :func:`run_concurrent` call."""
 
     total: int                      # units of work in scope
     already_done: int = 0           # skipped because the output already had them
@@ -173,4 +180,118 @@ def run_resumable(
             report.stopped_by_time = True
             log.warning("--max-minutes reached")
             break
+    return report
+
+
+def run_concurrent(
+    items: Sequence[T],
+    *,
+    id_of: Callable[[T], str],
+    process_item: Callable[[T], dict[str, Any]],
+    out_path: str | Path,
+    done_ids: set[str] | None = None,
+    workers: int = 4,
+    max_minutes: float = 0,
+    label: str = "items",
+    id_field: str = "id",
+    log_every: int = DEFAULT_BATCH_SIZE,
+) -> RunReport:
+    """Process ``items`` with a persistent pool of worker threads, writing each row as it lands.
+
+    Each of ``workers`` threads pulls the next pending item from a shared queue
+    and processes it independently. Against a server with that many parallel
+    slots, a slot is refilled the moment its request finishes, instead of
+    idling until the slowest member of a batch is done. Rows are appended and
+    flushed one at a time under a lock, so a kill loses only the requests in
+    flight, and resume works exactly as for :func:`run_resumable`.
+
+    Args:
+        items: Every unit of work in scope, including ones already done.
+        id_of: Stable id for an item; must match ``id_field`` in the output rows.
+        process_item: Turns one item into one output row. Runs on worker
+            threads, so it must be thread-safe. Raising is caught: the item is
+            recorded as failed, nothing is written, and resume retries it.
+        out_path: JSONL file that rows are appended to.
+        done_ids: Pre-read done ids; read from ``out_path`` when omitted.
+        workers: Threads, i.e. items in flight at once.
+        max_minutes: After this long, workers take no new items and finish the
+            ones they hold. 0 means no limit.
+        label: Noun used in progress logs.
+        id_field: Key holding the id in output rows.
+        log_every: Log progress after this many completed items.
+
+    Returns:
+        A :class:`RunReport`; print ``report.summary()`` before exiting.
+    """
+    out_path = Path(out_path)
+    if done_ids is None:
+        done_ids = read_done_ids(out_path, id_field)
+    pending = [item for item in items if id_of(item) not in done_ids]
+    report = RunReport(total=len(items), already_done=len(items) - len(pending))
+    log.info("%d %s in scope, %d already done, %d to do (%d workers)",
+             report.total, label, report.already_done, len(pending), workers)
+    if not pending:
+        return report
+
+    work: queue.SimpleQueue = queue.SimpleQueue()
+    for item in pending:
+        work.put(item)
+    deadline = time.monotonic() + max_minutes * 60 if max_minutes and max_minutes > 0 else None
+    stop = threading.Event()
+    lock = threading.Lock()
+    started = time.monotonic()
+    ensure_dir(out_path.parent)
+
+    with open(out_path, "a", encoding="utf-8") as fh:
+
+        def worker() -> None:
+            while not stop.is_set():
+                if deadline is not None and time.monotonic() > deadline:
+                    stop.set()
+                    break
+                try:
+                    item = work.get_nowait()
+                except queue.Empty:
+                    break
+                try:
+                    row = process_item(item)
+                except Exception as exc:  # noqa: BLE001 - one bad item must not end a long run
+                    message = f"{id_of(item)}: {type(exc).__name__}: {exc}"
+                    with lock:
+                        report.failed += 1
+                        report.errors.append(message)
+                    log.error("failed, left for resume — %s", message)
+                    continue
+                with lock:
+                    fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+                    fh.flush()
+                    report.processed += 1
+                    done_ids.add(id_of(item))
+                    if report.processed % log_every == 0:
+                        # Windows' monotonic clock ticks every ~15 ms: guard the division, or a
+                        # burst of fast items raises here and silently kills this worker.
+                        rate = report.processed / max(time.monotonic() - started, 1e-6)
+                        remaining = len(pending) - report.processed - report.failed
+                        log.info("%d/%d %s this run (%.2f/s, eta %.0f min)",
+                                 report.processed, len(pending), label, rate, remaining / rate / 60)
+
+        threads = [threading.Thread(target=worker, name=f"{label}-worker-{n}", daemon=True)
+                   for n in range(max(1, workers))]
+        for thread in threads:
+            thread.start()
+        try:
+            # join with a timeout so Ctrl+C reaches the main thread
+            while any(thread.is_alive() for thread in threads):
+                for thread in threads:
+                    thread.join(timeout=0.5)
+        except KeyboardInterrupt:
+            stop.set()
+            log.warning("interrupted — finishing the requests in flight, then exiting")
+            for thread in threads:
+                thread.join()
+            raise
+
+    if deadline is not None and stop.is_set() and len(pending) - report.processed - report.failed > 0:
+        report.stopped_by_time = True
+        log.warning("--max-minutes reached")
     return report

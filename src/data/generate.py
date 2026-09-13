@@ -35,26 +35,30 @@ Token budget
     and ``truncated`` so cleaning can drop the ones the cap still cuts.
 
 Backends
-    ``ollama`` (default) posts to a running Ollama server's ``/api/generate``
-    with ``stream=false``, ``machine_corpus.ollama.parallel`` requests at once.
-    The server only runs them concurrently if it was started with as many
+    ``ollama`` (default) runs a persistent pool of
+    ``machine_corpus.ollama.parallel`` worker threads
+    (:func:`src.utils.resumable.run_concurrent`). Each pulls the next prompt and
+    posts it to ``/api/generate`` (``stream=false``) on its own, so a server
+    slot is refilled the moment its request finishes rather than waiting for a
+    batch's slowest member. Each row is written the moment it completes. The
+    server only runs requests concurrently if it was started with as many
     slots. On Windows, set it once and restart the Ollama app::
 
         setx OLLAMA_NUM_PARALLEL 4      # then Quit Ollama from the tray and reopen it
 
     ``%LOCALAPPDATA%/Ollama/server.log`` prints ``OLLAMA_NUM_PARALLEL:4`` at
     startup when it took effect. Without it the server queues requests one at a
-    time: same output, slower. The per-batch log line shows the effective
-    concurrency, so a queueing server is visible within one batch.
+    time: same output, slower. The progress line (every 8 completed requests)
+    shows the effective concurrency, so a queueing server is visible at once.
 
     ``hf`` is the fallback: transformers + bitsandbytes 4-bit via
-    src/utils/modelload.py. One output file never mixes backends or models,
-    since that would mix quantisations; the run refuses to append to a file
-    written by a different one.
+    src/utils/modelload.py, in batches. One output file never mixes backends or
+    models, since that would mix quantisations; the run refuses to append to a
+    file written by a different one.
 
 Output is ``data/raw/machine/<generator>.jsonl``, one row per assigned human
-passage, carrying ``prompt_id`` back to it. Rows are appended after every batch
-and ids already present are skipped, so re-running the same command resumes.
+passage, carrying ``prompt_id`` back to it. Ids already present are skipped, so
+re-running the same command resumes.
 
 Serves docs/parts-plan.md Stage 3.
 """
@@ -68,17 +72,17 @@ import logging
 import random
 import re
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
 from src.data.schema import LABEL_MACHINE, LANGUAGE_BUCKETS
 from src.utils.config import load_config
 from src.utils.io import read_jsonl
-from src.utils.resumable import DEFAULT_BATCH_SIZE, read_done_ids, run_resumable
+from src.utils.resumable import DEFAULT_BATCH_SIZE, read_done_ids, run_concurrent, run_resumable
 
 log = logging.getLogger("generate")
 
@@ -316,18 +320,53 @@ def machine_row(item: dict[str, Any], text: str, *, generator: str, role: str, m
 
 
 class ThroughputMeter:
-    """Accumulates generated tokens and wall time; logs tokens/sec after every batch."""
+    """Thread-safe token counter that logs tokens/sec every ``log_every`` completed requests.
 
-    def __init__(self) -> None:
+    With ``concurrent=True`` it also logs per-stream speed and the effective
+    concurrency: summed per-request decode time over wall time in the window.
+    About 4 means every server slot stayed busy; about 1 means the server is
+    queueing requests.
+    """
+
+    def __init__(self, log_every: int = DEFAULT_BATCH_SIZE, concurrent: bool = True) -> None:
+        self.log_every = max(1, log_every)
+        self.concurrent = concurrent
+        self.started = time.monotonic()
         self.tokens = 0
-        self.seconds = 0.0
+        self._lock = threading.Lock()
+        self._reset_window(self.started)
 
-    def record(self, tokens: int, seconds: float, n_rows: int, n_truncated: int, extra: str = "") -> None:
-        self.tokens += tokens
-        self.seconds += seconds
-        log.info("batch: %d rows, %d tokens in %.1fs = %.1f tok/s (run %.1f tok/s)%s, %d hit num_predict",
-                 n_rows, tokens, seconds, tokens / seconds if seconds else 0.0,
-                 self.tokens / self.seconds if self.seconds else 0.0, extra, n_truncated)
+    def _reset_window(self, now: float) -> None:
+        self._window_start = now
+        self._window_tokens = 0
+        self._window_decode = 0.0
+        self._window_requests = 0
+        self._window_truncated = 0
+
+    @property
+    def elapsed(self) -> float:
+        return time.monotonic() - self.started
+
+    def record(self, tokens: int, decode_seconds: float, truncated: int, requests: int = 1) -> None:
+        with self._lock:
+            self.tokens += tokens
+            self._window_tokens += tokens
+            self._window_decode += decode_seconds
+            self._window_requests += requests
+            self._window_truncated += truncated
+            if self._window_requests < self.log_every:
+                return
+            now = time.monotonic()
+            wall = now - self._window_start
+            extra = ""
+            if self.concurrent and self._window_decode and wall:
+                extra = (f", per-stream {self._window_tokens / self._window_decode:.1f} tok/s, "
+                         f"concurrency x{self._window_decode / wall:.1f}")
+            log.info("%d requests: %d tokens in %.1fs = %.1f tok/s%s, %d hit num_predict (run %.1f tok/s)",
+                     self._window_requests, self._window_tokens, wall,
+                     self._window_tokens / wall if wall else 0.0, extra, self._window_truncated,
+                     self.tokens / max(now - self.started, 1e-6))
+            self._reset_window(now)
 
 
 # --- ollama backend ---------------------------------------------------------
@@ -359,6 +398,11 @@ class OllamaClient:
     def tags(self) -> list[dict[str, Any]]:
         return self._request("/api/tags").get("models", [])
 
+    def load(self, model: str, num_ctx: int, keep_alive: str) -> None:
+        """Load ``model`` with the run's context size; an empty prompt loads without generating."""
+        self._request("/api/generate", {"model": model, "prompt": "", "stream": False,
+                                        "options": {"num_ctx": num_ctx}, "keep_alive": keep_alive})
+
     def generate(self, model: str, prompt: str, options: dict[str, Any], keep_alive: str) -> dict[str, Any]:
         return self._request("/api/generate", {"model": model, "prompt": prompt, "stream": False,
                                                "options": options, "keep_alive": keep_alive})
@@ -380,23 +424,23 @@ def describe_ollama_model(client: OllamaClient, model: str) -> dict[str, Any]:
             "parameter_size": details.get("parameter_size"), "digest": digest[:12]}
 
 
-def make_ollama_processor(client: OllamaClient, generator: str, role: str, model: str,
-                          info: dict[str, Any], *, temperature: float, top_p: float,
-                          num_ctx: int, keep_alive: str, parallel: int, seed: int,
-                          retries: int = 1, retry_wait_s: float = 2.0,
-                          ) -> Callable[[Sequence[dict[str, Any]]], list[dict[str, Any]]]:
-    """Return a ``process_batch`` that sends a batch to Ollama, ``parallel`` requests at a time.
+def make_ollama_worker(client: OllamaClient, generator: str, role: str, model: str,
+                       info: dict[str, Any], *, temperature: float, top_p: float,
+                       num_ctx: int, keep_alive: str, seed: int, retries: int = 1,
+                       retry_wait_s: float = 2.0, log_every: int = DEFAULT_BATCH_SIZE,
+                       ) -> Callable[[dict[str, Any]], dict[str, Any]]:
+    """Return a thread-safe ``process_item`` that generates one passage with one Ollama request.
 
-    A request that still fails after ``retries`` is logged and left out of the
-    returned rows, so it stays pending and the next run retries it. The batch
-    only fails as a whole if every request in it failed.
+    Built for :func:`src.utils.resumable.run_concurrent`, whose worker threads
+    each call it independently. A request that still fails after ``retries``
+    raises; the runner logs it and leaves the passage for the next resume.
     """
-    meter = ThroughputMeter()
+    meter = ThroughputMeter(log_every, concurrent=True)
     decoding = {"temperature": temperature, "top_p": top_p, "num_ctx": num_ctx,
                 "quantization": info["quantization"], "digest": info["digest"]}
-    warned: list[str] = []
+    warned = threading.Event()
 
-    def one(item: dict[str, Any]) -> tuple[dict[str, Any], float]:
+    def process_item(item: dict[str, Any]) -> dict[str, Any]:
         item_seed = _hash64(f"{seed}:{item['id']}") % 2**31
         options = {"num_predict": item["num_predict"], "num_ctx": num_ctx,
                    "temperature": temperature, "top_p": top_p, "seed": item_seed}
@@ -410,45 +454,18 @@ def make_ollama_processor(client: OllamaClient, generator: str, role: str, model
                 log.warning("%s: %s — retrying", item["id"], exc)
                 time.sleep(retry_wait_s)
         prompt_tokens = int(response.get("prompt_eval_count") or 0)
-        if prompt_tokens + item["num_predict"] > num_ctx and not warned:
-            warned.append(item["id"])
+        if prompt_tokens + item["num_predict"] > num_ctx and not warned.is_set():
+            warned.set()
             log.warning("%s: prompt %d + num_predict %d exceeds num_ctx %d — raise machine_corpus.ollama.num_ctx",
                         item["id"], prompt_tokens, item["num_predict"], num_ctx)
         row = machine_row(item, (response.get("response") or "").strip(), generator=generator, role=role,
                           model=model, backend="ollama", gen_tokens=int(response.get("eval_count") or 0),
                           done_reason=response.get("done_reason"), decoding={**decoding, "seed": item_seed})
-        return row, int(response.get("eval_duration") or 0) / 1e9
+        meter.record(row["gen_tokens"], int(response.get("eval_duration") or 0) / 1e9, int(row["truncated"]))
+        return row
 
-    def process_batch(batch: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
-        started = time.monotonic()
-        with ThreadPoolExecutor(max_workers=parallel) as pool:
-            futures = [pool.submit(one, item) for item in batch]
-        rows: list[dict[str, Any]] = []
-        errors: list[str] = []
-        decode_seconds = 0.0
-        for item, future in zip(batch, futures):
-            try:
-                row, seconds = future.result()
-            except Exception as exc:  # noqa: BLE001 - recorded, retried on resume
-                errors.append(f"{item['id']}: {type(exc).__name__}: {exc}")
-                continue
-            rows.append(row)
-            decode_seconds += seconds
-        for error in errors:
-            log.error("request failed, left for resume — %s", error)
-        if not rows:
-            raise RuntimeError(f"all {len(batch)} requests failed; first: {errors[0]}")
-        tokens = sum(row["gen_tokens"] for row in rows)
-        wall = time.monotonic() - started
-        # Summed per-request decode time over wall time = how many requests the
-        # server really ran at once. ~1.0 means it is queueing (OLLAMA_NUM_PARALLEL unset).
-        extra = f", per-stream {tokens / decode_seconds:.1f} tok/s, concurrency x{decode_seconds / wall:.1f}" \
-            if decode_seconds and wall else ""
-        meter.record(tokens, wall, len(rows), sum(row["truncated"] for row in rows), extra)
-        return rows
-
-    process_batch.meter = meter  # type: ignore[attr-defined]
-    return process_batch
+    process_item.meter = meter  # type: ignore[attr-defined]
+    return process_item
 
 
 # --- hf backend (fallback) --------------------------------------------------
@@ -458,7 +475,7 @@ def make_hf_processor(model, tokenizer, generator: str, role: str, model_id: str
     """Return a ``process_batch`` that generates a batch locally with transformers."""
     import torch
 
-    meter = ThroughputMeter()
+    meter = ThroughputMeter(log_every=1, concurrent=False)   # one log line per batch
 
     def process_batch(batch: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
         started = time.monotonic()
@@ -497,7 +514,7 @@ def make_hf_processor(model, tokenizer, generator: str, role: str, model_id: str
                                     done_reason="length" if n_tokens >= max_new else "stop",
                                     decoding=decoding))
         meter.record(sum(r["gen_tokens"] for r in rows), time.monotonic() - started,
-                     len(rows), sum(r["truncated"] for r in rows))
+                     sum(r["truncated"] for r in rows), requests=len(rows))
         return rows
 
     process_batch.meter = meter  # type: ignore[attr-defined]
@@ -520,9 +537,9 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--config", default="configs/data.yaml")
     parser.add_argument("--out-dir", default=None, help="default: machine_corpus.output_dir")
     parser.add_argument("--human-dir", default=None, help="default: human_corpus.output_dir")
-    parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE,
-                        help="rows appended per batch; ollama sends --parallel of them at once")
-    parser.add_argument("--parallel", type=int, default=None, help="default: machine_corpus.ollama.parallel")
+    parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE, help="hf backend: prompts per batch")
+    parser.add_argument("--parallel", type=int, default=None,
+                        help="ollama backend: worker threads (default: machine_corpus.ollama.parallel)")
     parser.add_argument("--host", default=None, help="default: machine_corpus.ollama.host")
     parser.add_argument("--temperature", type=float, default=None)
     parser.add_argument("--top-p", type=float, default=None)
@@ -591,26 +608,33 @@ def main(argv: list[str] | None = None) -> None:
                               float(ollama_cfg.get("request_timeout_s", 900)))
         info = describe_ollama_model(client, model)
         parallel = args.parallel or int(ollama_cfg.get("parallel", 4))
-        log.info("ollama %s: %s (%s, %s, digest %s), %d parallel requests",
+        num_ctx = int(ollama_cfg.get("num_ctx", 3072))
+        keep_alive = str(ollama_cfg.get("keep_alive", "30m"))
+        log.info("ollama %s: %s (%s, %s, digest %s), %d worker threads",
                  info["server_version"], model, info["parameter_size"], info["quantization"], info["digest"], parallel)
-        process_batch = make_ollama_processor(
-            client, args.generator, spec["role"], model, info, temperature=temperature, top_p=top_p,
-            num_ctx=int(ollama_cfg.get("num_ctx", 3072)), keep_alive=str(ollama_cfg.get("keep_alive", "30m")),
-            parallel=parallel, seed=args.seed)
+        load_started = time.monotonic()
+        client.load(model, num_ctx, keep_alive)   # so the first requests do not queue behind the load
+        log.info("model loaded in %.1fs", time.monotonic() - load_started)
+        process_item = make_ollama_worker(client, args.generator, spec["role"], model, info,
+                                          temperature=temperature, top_p=top_p, num_ctx=num_ctx,
+                                          keep_alive=keep_alive, seed=args.seed)
+        meter = process_item.meter  # type: ignore[attr-defined]
         precision = info["quantization"]
+        report = run_concurrent(prompts, id_of=lambda p: p["id"], process_item=process_item,
+                                out_path=out_path, done_ids=done_ids, workers=parallel,
+                                max_minutes=args.max_minutes, label="passages")
     else:
         from src.utils.modelload import load_causal_lm
 
         hf_model, tokenizer, info = load_causal_lm(model, device=args.device)
         process_batch = make_hf_processor(hf_model, tokenizer, args.generator, spec["role"], model, info,
                                           temperature=temperature, top_p=top_p)
+        meter = process_batch.meter  # type: ignore[attr-defined]
         precision = f"{info['dtype']} on {info['device']}"
+        report = run_resumable(prompts, id_of=lambda p: p["id"], process_batch=process_batch,
+                               out_path=out_path, done_ids=done_ids, batch_size=args.batch_size,
+                               max_minutes=args.max_minutes, label="passages")
 
-    report = run_resumable(
-        prompts, id_of=lambda p: p["id"], process_batch=process_batch, out_path=out_path,
-        done_ids=done_ids, batch_size=args.batch_size, max_minutes=args.max_minutes,
-        label="passages",
-    )
     resume = f"python -m src.data.generate --generator {args.generator} --buckets {args.buckets}"
     if args.fraction != 1.0:
         resume += f" --fraction {args.fraction}"
@@ -620,13 +644,12 @@ def main(argv: list[str] | None = None) -> None:
         resume += f" --model {model}"
     print(f"\ngenerator={args.generator} ({spec['role']}: {model}, {precision}, {backend})  out={out_path}")
     print(report.summary(f"resume with: {resume}"))
-    meter = process_batch.meter  # type: ignore[attr-defined]
-    if meter.seconds:
-        print(f"throughput: {meter.tokens:,} tokens in {meter.seconds / 60:.1f} min = "
-              f"{meter.tokens / meter.seconds:.1f} tokens/sec")
+    if meter.tokens:
+        print(f"throughput: {meter.tokens:,} tokens in {meter.elapsed / 60:.1f} min = "
+              f"{meter.tokens / meter.elapsed:.1f} tokens/sec")
     on_disk = len(read_done_ids(out_path) & {p["id"] for p in prompts})
     if on_disk != report.done:
-        print(f"on disk: {on_disk} of {len(prompts)} ({report.done - on_disk} requests failed; retried on resume)")
+        print(f"on disk: {on_disk} of {len(prompts)}")
     if report.errors:
         print(f"first error: {report.errors[0]}")
 

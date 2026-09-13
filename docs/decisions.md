@@ -333,6 +333,17 @@ file mixes quantisations. Supersedes the 2026-09-02 seen/held-out generator rows
   append to a file written by another backend or model.
 - stdlib `urllib` only, so no new dependency. Per-request seed =
   `sha256(seed:id)`.
+- **Persistent worker pool (same day, after the first minutes of qwen7b).**
+  The first client sent 8-row batches, 4 requests at a time, and waited for
+  the whole batch before starting the next, so slots idled behind each
+  batch's longest request: batch 2 ran at 79.7 tok/s (concurrency x2.6), batch
+  3 at 46.7 tok/s (x2.1). Now `run_concurrent` (src/utils/resumable.py) keeps 4
+  worker threads that each pull the next prompt from a shared queue and post
+  on their own. Each row is written under a lock the moment it completes, and
+  resume semantics are unchanged. The model is loaded once before the workers
+  start (an empty-prompt request), so the first requests no longer queue
+  behind a ~75 s load. Progress and tokens/s are logged every 8 completed
+  requests.
 
 ### 2. Quantisation: Q4_K_M for all five generators
 
