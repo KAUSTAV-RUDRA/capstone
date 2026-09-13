@@ -1,0 +1,65 @@
+{% extends "detector/base.html" %}
+{% block title %}Result - MGT Detector{% endblock %}
+{% block content %}
+<h1 class="h3 mb-3">Analysis result</h1>
+
+{% if decision %}
+<div class="row g-4">
+  <div class="col-lg-5">
+    <div class="card verdict-card verdict-{{ decision.verdict|lower }}">
+      <div class="card-body text-center">
+        <div class="text-uppercase text-muted small">Verdict</div>
+        <div class="display-5 fw-bold my-2">{{ decision.verdict }}</div>
+        <div class="fs-5">Confidence: {{ decision.confidence }}</div>
+        <div class="text-muted small mt-2">
+          Driven by the <strong>{{ decision.driving_head }}</strong> head
+        </div>
+      </div>
+    </div>
+
+    <div class="card mt-3"><div class="card-body">
+      <h6 class="card-title">Head scores</h6>
+      <table class="table table-sm mb-0">
+        <tbody>
+          <tr><th scope="row">Stylometric (Head A)</th><td>{{ decision.stylometric_score }}</td></tr>
+          <tr><th scope="row">Curvature (Head B)</th><td>{{ decision.curvature_score }}</td></tr>
+          <tr><th scope="row">Semantic (Head C)</th><td>{{ decision.semantic_score|default:"n/a" }}</td></tr>
+        </tbody>
+      </table>
+    </div></div>
+  </div>
+
+  <div class="col-lg-7">
+    <div class="card"><div class="card-body">
+      <h6 class="card-title">Top stylometric features</h6>
+      <table class="table table-sm">
+        <thead><tr><th>Feature</th><th>Value</th><th>Contribution</th></tr></thead>
+        <tbody>
+          {% for f in top_features %}
+          <tr><td>{{ f.name }}</td><td>{{ f.value }}</td><td>{{ f.contribution }}</td></tr>
+          {% empty %}
+          <tr><td colspan="3" class="text-muted">No feature attribution available.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div></div>
+
+    <div class="card mt-3"><div class="card-body">
+      <h6 class="card-title">Submission</h6>
+      <dl class="row small mb-0">
+        <dt class="col-sm-3">ID</dt><dd class="col-sm-9">{{ submission.id }}</dd>
+        <dt class="col-sm-3">Language</dt><dd class="col-sm-9">{{ submission.get_language_display }}</dd>
+        <dt class="col-sm-3">Detected</dt><dd class="col-sm-9">{{ decision.explanation.language|default:"-" }}</dd>
+        <dt class="col-sm-3">File</dt><dd class="col-sm-9">{{ submission.source_filename|default:"(pasted text)" }}</dd>
+        <dt class="col-sm-3">Model</dt><dd class="col-sm-9">{{ decision.model_version }}</dd>
+        <dt class="col-sm-3">When</dt><dd class="col-sm-9">{{ submission.uploaded_at }}</dd>
+      </dl>
+    </div></div>
+  </div>
+</div>
+{% else %}
+<div class="alert alert-secondary">No decision recorded for this submission.</div>
+{% endif %}
+
+<a class="btn btn-outline-secondary mt-4" href="{% url 'detector:analyse' %}">Analyse another</a>
+{% endblock %}

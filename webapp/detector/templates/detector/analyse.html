@@ -1,0 +1,41 @@
+{% extends "detector/base.html" %}
+{% block title %}Analyse - MGT Detector{% endblock %}
+{% block content %}
+<h1 class="h3 mb-3">Analyse a submission</h1>
+<div class="row">
+  <div class="col-lg-8">
+    <form method="post" enctype="multipart/form-data" novalidate>
+      {% csrf_token %}
+      {% if form.non_field_errors %}
+        <div class="alert alert-danger">{{ form.non_field_errors }}</div>
+      {% endif %}
+      <div class="mb-3">
+        <label class="form-label" for="{{ form.text.id_for_label }}">{{ form.text.label }}</label>
+        {{ form.text }}
+        {{ form.text.errors }}
+      </div>
+      <div class="mb-3">
+        <label class="form-label" for="{{ form.file.id_for_label }}">{{ form.file.label }}</label>
+        {{ form.file }}
+        {{ form.file.errors }}
+      </div>
+      <div class="mb-3 col-sm-6">
+        <label class="form-label" for="{{ form.language.id_for_label }}">{{ form.language.label }}</label>
+        {{ form.language }}
+        {{ form.language.errors }}
+      </div>
+      <button type="submit" class="btn btn-primary">Analyse</button>
+    </form>
+  </div>
+  <div class="col-lg-4">
+    <div class="card"><div class="card-body">
+      <h6 class="card-title text-muted">How to read the result</h6>
+      <ul class="small mb-0">
+        <li><span class="badge bg-success">HUMAN</span> likely human-written.</li>
+        <li><span class="badge bg-secondary">ABSTAIN</span> signal too weak &mdash; send to human review.</li>
+        <li><span class="badge bg-danger">MACHINE</span> likely machine-generated.</li>
+      </ul>
+    </div></div>
+  </div>
+</div>
+{% endblock %}

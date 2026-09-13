@@ -1,0 +1,37 @@
+{% extends "detector/base.html" %}
+{% block title %}About - MGT Detector{% endblock %}
+{% block content %}
+<h1 class="h3 mb-3">About this project</h1>
+
+<h2 class="h5 mt-4">Method</h2>
+<p>
+  Each submission is preprocessed (script normalisation, Romanised detection,
+  code-mix ratio) and routed to a language bucket (en / hi / te / code-mixed).
+  Two heads score it: a <strong>stylometric</strong> head (Head A) and a
+  <strong>perplexity-curvature</strong> head (Head B, Fast-DetectGPT over mGPT).
+  An optional MuRIL semantic head (Head C) is used only when enough VRAM is
+  available. An interpretable fusion model combines the head scores; the fused
+  probability is temperature-scaled and passed through a
+  <strong>per-language split-conformal threshold</strong> and an
+  <strong>abstention gate</strong> that returns human / abstain / machine with a
+  distribution-free bound on the false-positive rate in every language.
+</p>
+
+<h2 class="h5 mt-4">Team</h2>
+<ul>
+  <li><strong>P1 &mdash; Research lead:</strong> curvature head, fusion,
+      calibration &amp; abstention, paper, Patent&nbsp;1, presentations.</li>
+  <li><strong>P2 &mdash; Data &amp; evaluation:</strong> corpus, ethics, frozen
+      splits, evaluation scripts, fairness audit, Patent&nbsp;2, Consultancy&nbsp;2.</li>
+  <li><strong>P3 &mdash; Engineering &amp; product:</strong> stylometric head,
+      baselines, this web app, demo, deployment, Consultancy&nbsp;1.</li>
+</ul>
+
+<h2 class="h5 mt-4">Disclaimer</h2>
+<div class="alert alert-warning">
+  This system produces <strong>decision support, never an automatic accusation</strong>.
+  An <em>abstain</em> outcome means the evidence is insufficient and the case
+  should go to a human reviewer. No output should be treated as proof of
+  academic misconduct.
+</div>
+{% endblock %}

@@ -1,0 +1,62 @@
+{% extends "detector/base.html" %}
+{% block title %}Dashboard - MGT Detector{% endblock %}
+{% block content %}
+<h1 class="h3 mb-3">Dashboard</h1>
+<p class="text-muted">Total submissions: {{ total }}</p>
+
+<div class="row g-4">
+  <div class="col-md-6">
+    <div class="card"><div class="card-body">
+      <h6 class="card-title">By verdict</h6>
+      <table class="table table-sm mb-0">
+        <thead><tr><th>Verdict</th><th>Count</th></tr></thead>
+        <tbody>
+          {% for row in verdict_counts %}
+          <tr><td>{{ row.verdict }}</td><td>{{ row.n }}</td></tr>
+          {% empty %}
+          <tr><td colspan="2" class="text-muted">No decisions yet.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div></div>
+  </div>
+
+  <div class="col-md-6">
+    <div class="card"><div class="card-body">
+      <h6 class="card-title">By language</h6>
+      <table class="table table-sm mb-0">
+        <thead><tr><th>Language</th><th>Count</th></tr></thead>
+        <tbody>
+          {% for row in language_counts %}
+          <tr><td>{{ row.language }}</td><td>{{ row.n }}</td></tr>
+          {% empty %}
+          <tr><td colspan="2" class="text-muted">No submissions yet.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div></div>
+  </div>
+</div>
+
+<h2 class="h5 mt-4">Recent submissions</h2>
+<div class="table-responsive">
+  <table class="table table-hover align-middle">
+    <thead>
+      <tr><th>ID</th><th>Language</th><th>Verdict</th><th>Confidence</th><th>Uploaded</th></tr>
+    </thead>
+    <tbody>
+      {% for s in recent %}
+      <tr>
+        <td><a href="{% url 'detector:result' s.id %}">{{ s.id|truncatechars:12 }}</a></td>
+        <td>{{ s.language }}</td>
+        <td>{% if s.decision %}{{ s.decision.verdict }}{% else %}-{% endif %}</td>
+        <td>{% if s.decision %}{{ s.decision.confidence }}{% else %}-{% endif %}</td>
+        <td>{{ s.uploaded_at }}</td>
+      </tr>
+      {% empty %}
+      <tr><td colspan="5" class="text-muted">Nothing submitted yet. Try the Analyse page.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

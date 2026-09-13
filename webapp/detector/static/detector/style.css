@@ -1,0 +1,24 @@
+/* Minimal overrides on top of Bootstrap 5. */
+
+.footer {
+  background: var(--bs-tertiary-bg, #f8f9fa);
+}
+
+.decision-support-banner {
+  margin-bottom: 1.5rem;
+}
+
+/* Verdict cards */
+.verdict-card {
+  border-width: 2px;
+}
+.verdict-card.verdict-human { border-color: var(--bs-success); }
+.verdict-card.verdict-machine { border-color: var(--bs-danger); }
+.verdict-card.verdict-abstain { border-color: var(--bs-secondary); }
+
+/* Verdict badges (batch/dashboard tables) */
+.verdict-badge.verdict-human { background-color: var(--bs-success); }
+.verdict-badge.verdict-machine { background-color: var(--bs-danger); }
+.verdict-badge.verdict-abstain { background-color: var(--bs-secondary); }
+
+.navbar-brand { font-weight: 700; letter-spacing: 0.02em; }

@@ -15,6 +15,7 @@ docs/execution-plan.md           <- literature, datasets, architecture detail
 - Held-out generators only for evaluation.
 - No fine-tuning of large models. Nothing above 2B params. 4GB VRAM floor.
 - data/processed/splits.json is frozen once written.
+- Never delete or move webapp/ or docs/.
 - src/ has ZERO Django imports. webapp/detector/services.py is the only bridge.
 - Output is decision support, never an automatic accusation.
 - MuRIL is encoder-only: Head C only, never for curvature.
