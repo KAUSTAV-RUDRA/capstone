@@ -1,7 +1,17 @@
 # Model configuration.
 
-# Head B scorer: only multilingual causal LM with real Telugu coverage at a
-# runnable size (locked §5). Fallback used if mGPT is too heavy on the host.
+# Head B scorer: LOCKED 2026-09-13 on measured tokenizer fertility
+# (results/tokenizer_fertility.csv, scripts/tokenizer_fertility.py).
+#
+#   tokens/word   en      hi      te       cm
+#   mGPT          1.363   3.560   6.319    1.714
+#   Qwen2.5-0.5B  1.339   4.804  11.919    1.672
+#
+# The two are equivalent on en and cm, but Qwen needs 1.9x as many tokens per
+# Telugu word and 1.35x per Hindi word. Curvature is computed from per-token
+# log-probabilities, so that fragmentation directly degrades the Head B signal
+# in exactly the buckets this project exists to cover. Fallback is kept for
+# hosts where mGPT-1.3B does not fit; using it costs Indic sensitivity.
 scorer_model: "ai-forever/mGPT"
 scorer_model_fallback: "Qwen/Qwen2.5-0.5B"
 

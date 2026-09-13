@@ -58,6 +58,11 @@ sources:
 human_corpus:
   output_dir: data/raw/human
   passage_words: {min: 120, max: 300}       # one passage per source doc, cut at a sentence boundary
+  # Every source is calibration_eligible unless it says otherwise. A source that
+  # is NOT eligible is barred from the `cal` split by freeze_splits and routed to
+  # train/test: the conformal guarantee is only as good as the certainty that the
+  # calibration text is human (see decisions.md 2026-09-13).
+  calibration_eligible_default: true
   dedup: {num_perm: 128, threshold: 0.8, shingle_words: 5}   # MinHash LSH over word 5-grams
   buckets:
     en:
@@ -164,6 +169,7 @@ human_corpus:
               provenance: "festvox/cmu_hinglish_dog (Zhou et al. 2018; Hinglish version 2020): two-person chat about film articles, utterances joined per conversation, pre-ChatGPT; CC-BY-SA-3.0"
             - name: comi_lingua
               max_share: 1.0
+              calibration_eligible: false   # no stated collection date -> cannot rule out machine text
               config: TN              # the only Roman-script config; others are Devanagari
               splits: [train, test]
               column: Sentences       # raw comment, NOT the annotator-normalised columns

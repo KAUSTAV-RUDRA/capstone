@@ -5,6 +5,59 @@ Newest entries at the top.
 
 ---
 
+## 2026-09-13 — Part 4: tokenizer fertility + three resumable CLIs
+
+- **Head B scorer LOCKED to `ai-forever/mGPT`** on measured fertility
+  (`scripts/tokenizer_fertility.py`, 200 passages/bucket, tokenizers only,
+  `results/tokenizer_fertility.csv`). tokens/word — mGPT 1.363 / 3.560 / 6.319 /
+  1.714 across en/hi/te/cm; Qwen2.5-0.5B 1.339 / 4.804 / 11.919 / 1.672. Tied on
+  en and cm, but Qwen costs **1.89x** more tokens per Telugu word and 1.35x per
+  Hindi word, which directly weakens curvature in the Indic buckets. Even with
+  mGPT, Telugu runs 4.64x English — that ratio is the F2 result, not just setup.
+  gemma-2-2b and Llama-3.1-8B are gated and recorded as `status=gated`.
+- **`src/utils/resumable.py`** — the shared spine: the output file is the
+  progress record, ids already present are skipped, rows are appended and
+  flushed after every batch of 8, `--max-minutes` stops between batches, and a
+  failing batch is logged and skipped rather than ending a multi-hour run.
+- **`src/utils/modelload.py`** — one loading rule: >3B params loads 4-bit
+  bitsandbytes (nf4, double quant), everything else fp16 on CUDA. Size comes
+  from a known-sizes table, then the model id, then Hub metadata; unknown is
+  treated as large, since guessing fp16 for a 9B model means an OOM hours in.
+- **`src/data/generate.py`** — prompt-matched machine text: the prompt is the
+  human passage's first sentence (capped at 40 words so the model gets a topic,
+  not a copy) and the requested length is that passage's length bin. cm gets its
+  own instruction, since asking for "Hinglish" alone yields Devanagari or formal
+  prose. Output carries `prompt_id` back to the human row.
+- **`src/eval/score.py`** — one column per run into `results/scores.parquet`,
+  via a registry; all eight columns registered as stubs that name the part that
+  fills them in. Progress journals to `results/.score_<column>.jsonl` and folds
+  into the parquet on exit. Convention fixed: **higher = more machine-like** for
+  every column.
+- **`src/data/attack.py`** — stub, but the CLI surface, id suffixes, attack_type
+  values and output contract are fixed now.
+- **Resume proven on the real path:** 8 en prompts through
+  Qwen2.5-0.5B-Instruct at batch-size 4, process killed after the first batch
+  landed (4 rows on disk), identical command re-run → "8 passages in scope, 4
+  already done, 4 to do" → `complete — 8 of 8`, 8 unique ids, no duplicates.
+  Found and fixed a real bug doing it (`RunReport.processed` had no default, so
+  every run crashed on its first report).
+- Also recorded the two cm decisions: a supplementary **40–120 word band table**
+  across all buckets, and **cm calibration restricted to cmu_hinglish_dog +
+  HinGE** (1,025 rows vs the 1,000 floor) with COMI-LINGUA train/test only.
+  `configs/data.yaml` carries `calibration_eligible` per source and
+  `freeze_splits.py` has the enforcement contract written into it.
+
+**Verify:** run `tests/utils/test_resumable.py` and `tests/data/test_generate.py`
+with the venv python → 12 PASS offline; `python -m src.eval.score --list` prints
+the eight registered columns.
+
+**Next:** Stage 3 — run `src.data.generate` for the five generators. Note that
+lengths overshoot (a 150-word request returned 144–391 words), which is normal
+and is exactly what Part 13's length-matching to the human bin distribution
+corrects.
+
+---
+
 ## 2026-09-13 — Part 3: cm human corpus + corpus card (human side complete)
 
 - **hi/te domain blend first:** IndicCorpV2 capped at `max_share: 0.75`, both

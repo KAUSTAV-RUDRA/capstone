@@ -209,6 +209,102 @@ but not English-matrix. HinGE inserts Hindi *content* words into English
 sentences ("a part of vikas of the adhosanrachna"), scoring a median 0.18, so
 42 % of it was rejected and the bucket under-represents that mixing pattern.
 
+## 2026-09-13 — cm: length-band table and calibration-source restriction
+
+Both decisions answer problems raised when the cm bucket was built (see the
+Part 3 entry below): cm is much shorter than the other buckets, and 53 % of it
+comes from a source with no stated collection date.
+
+### (a) Supplementary length-band table, 40-120 words, across all buckets
+
+Every per-bucket table that includes `cm` is accompanied by a supplementary
+table restricted to passages of **40-120 words**, computed for all four
+buckets. The main tables keep the full corpus.
+
+**Why.** cm averages 55.2 words against 170-211 elsewhere, and curvature scores
+depend strongly on length, so a full-corpus per-bucket comparison confounds
+language with length. A common length band is the cheapest control that needs
+no new data: it holds length roughly constant and lets the language difference
+be read on its own. 40-120 is the widest window with real mass in every
+bucket - it covers the cm chat transcripts (median 93) and the shorter tail of
+en/hi/te, while excluding the ~21-word comment mode that has no counterpart
+elsewhere.
+
+**Consequences.** The band is a *reporting* decision, not a corpus change: no
+rows are dropped. Sub-band counts per bucket must be printed alongside the
+table, because a band with too few rows in some bucket is not interpretable.
+Part 22 produces this as a companion to T1 and T5. The headline claim still
+comes from the full corpus, with the band table as the robustness check.
+
+### (b) cm calibration uses only cmu_hinglish_dog + HinGE
+
+The cm conformal calibration split draws **only** from `cmu_hinglish_dog` and
+`hinge`. `comi_lingua` rows are routed to train/test only.
+
+**Why.** The conformal threshold is fitted on human-only text and its guarantee
+is exactly as good as the certainty that the text is human. COMI-LINGUA states
+no collection date, so machine-written comments cannot be ruled out in it; both
+other cm sources predate ChatGPT (2018-2021). A machine-written row inside the
+calibration set inflates the human score distribution and silently loosens the
+threshold - the one failure that would quietly void the project's central
+claim. The other three buckets are unaffected, since every en/hi/te source
+predates ChatGPT.
+
+**Feasibility.** cmu_hinglish_dog (917) + hinge (108) = **1,025 rows**, against
+the 1,000-row calibration floor (locked §5). That clears it by 25 rows, so the
+cm calibration set is the whole of both sources and the floor is met exactly.
+If either source shrinks on a rebuild, cm calibration drops below the floor and
+the restriction has to be revisited rather than quietly broken.
+
+**Mechanism.** `configs/data.yaml` carries `calibration_eligible` on every
+source spec (default `true`, `false` on `comi_lingua`).
+`src/data/freeze_splits.py` MUST enforce it: any row whose `source` is not
+calibration-eligible is barred from the `cal` split and assigned to
+train/test. The flag is per *source*, and rows already carry `source`, so no
+rebuild is needed. `freeze_splits` must also assert the per-bucket calibration
+floor after routing, so a violation fails loudly instead of producing a corpus
+that looks fine.
+
+## 2026-09-13 — Head B scorer LOCKED: ai-forever/mGPT (tokenizer fertility)
+
+`scripts/tokenizer_fertility.py`, 200 human passages per bucket from
+`data/raw/human/`, tokenizers only. Full table in
+`results/tokenizer_fertility.csv`.
+
+| tokens per word | en | hi | te | cm |
+|---|---|---|---|---|
+| **ai-forever/mGPT** | 1.363 | 3.560 | 6.319 | 1.714 |
+| Qwen/Qwen2.5-0.5B | 1.339 | 4.804 | 11.919 | 1.672 |
+| mGPT advantage | — | **1.35x** | **1.89x** | — |
+
+| tokens per char | en | hi | te | cm |
+|---|---|---|---|---|
+| ai-forever/mGPT | 0.226 | 0.684 | 0.776 | 0.324 |
+| Qwen/Qwen2.5-0.5B | 0.222 | 0.923 | 1.464 | 0.316 |
+
+**Decision: mGPT is the Head B scorer.** The two tokenizers are
+indistinguishable on `en` (1.363 vs 1.339) and on `cm` (1.714 vs 1.672, since
+Romanised Hinglish is Latin script and both handle it as English-like). They
+diverge sharply on the Indic scripts: Qwen needs 1.89x as many tokens per
+Telugu word and 1.35x per Hindi word. Fast-DetectGPT curvature is computed from
+per-token conditional log-probabilities, so heavier fragmentation spreads the
+same information across more, individually less predictable tokens and weakens
+the signal in precisely the buckets this project exists to serve. `Qwen2.5-0.5B`
+stays as the documented fallback for hosts where mGPT-1.3B will not fit, at a
+known cost in Indic sensitivity.
+
+**Fertility is itself a result, not just a setup detail.** Even with mGPT,
+Telugu costs 4.64x as many tokens per word as English and Hindi 2.61x. This is
+the quantitative explanation for any per-bucket AUROC gap Head B shows, and it
+is what F2 (fertility vs AUROC) plots. Report it before explaining a weak
+Telugu number.
+
+**gemma-2-2b and Llama-3.1-8B were skipped: both are gated** and this host has
+no HF token. The script records them as `status=gated` rather than failing.
+Running `huggingface-cli login` and accepting both licences would fill those
+rows; it is not required, since the scorer choice is settled by the two models
+that did run.
+
 ---
 
 ## Decisions still open (fill as resolved)
