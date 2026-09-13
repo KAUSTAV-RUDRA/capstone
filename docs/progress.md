@@ -5,6 +5,48 @@ Newest entries at the top.
 
 ---
 
+## 2026-09-13 — Part 1: en human corpus (2,200 passages, two writer bands)
+
+- `src/data/build_human_corpus.py` implemented as a resumable CLI
+  (`python -m src.data.build_human_corpus --bucket <en|hi|te|cm> --target N
+  [--config configs/data.yaml] [--max-minutes M]`). Per band, sources are pulled
+  in order (`human_corpus` section of `configs/data.yaml`); one 120–300-word
+  passage per source doc, cut at a sentence boundary with a deterministic per-doc
+  target length; MinHash LSH dedup (datasketch, 128 perms, word 5-grams, J≥0.8);
+  rows appended to `data/raw/human/<bucket>.jsonl` one at a time with
+  deterministic ids, so re-running skips what is on disk and pulls the shortfall.
+- **en result** (`data/raw/human/en.jsonl`, gitignored): 2,200 rows, mean 210.6
+  words. `writer_L1_band=general` 1,100 (mean 202.8 words): HC3 reddit_eli5 304,
+  wiki_csai 300, open_qa 1, Wikipedia `20231101.en` page id ≤ 1,853 → 495.
+  `writer_L1_band=indian` 1,100 (mean 218.4 words): Samanantar en side (hi
+  config) 1,100. Ids unique; passages 120–300 words; zero LaTeX / wiki-markup /
+  template-hole artefacts after cleaning.
+- **Cleaning that turned out to be necessary:** wikimedia dump text has
+  template holes (`Albedo (; ) is`, `an area of , making`) in ~1/3 of pages and
+  wiki_csai has LaTeX; HC3 ELI5/WikiQA answers are PTB-tokenised (`word ,
+  it 's`). Benign holes are repaired, PTB spacing undone, and any passage that
+  still carries an artefact is rejected (21 % of Wikipedia docs, ~3 % of HC3).
+  Without this, human text would be separable from machine text by surface cues.
+- **Resume verified on real sources:** `--target 1000` then `--target 2200`
+  gave 1,000 → 2,200 rows with every earlier id reported `already_present`; a
+  third identical run pulled nothing (2 s, file hash unchanged).
+- **Caveats:** HC3 open_qa answers are almost all < 120 words (7 of 1,187), so
+  that subset contributes ~nothing. Samanantar on HF is shuffled sentences, not
+  documents — `indian` passages are runs of filtered sentences (see
+  `docs/decisions.md`). Samanantar is CC-BY-NC-4.0.
+- Also: `src/utils/{config,io,logging}.py` stubs implemented (needed here);
+  `WRITER_L1_BANDS` → `general / indian / unknown`; `datasets==5.0.1`,
+  `datasketch==2.0.0`, `pyarrow==25.0.1` pinned; `venv/` rebuilt (it had been
+  moved from another folder and had no interpreter) — CPU torch for now.
+
+**Verify:** `.env\Scripts\python.exe tests\data	est_build_human_corpus.py`
+→ 9 × PASS (offline). Then
+`.env\Scripts\python.exe -m src.data.build_human_corpus --bucket en --target 2200`
+→ prints the band table above and `complete` within seconds (nothing to pull).
+
+**Next:** Part 2 — hi and te sources (IndicCorpV2 / Wikipedia hi, te) in
+`configs/data.yaml`, run for both buckets.
+
 ## 2026-09-02 — exp00 HC3 smoke test: Fast-DetectGPT AUROC = 0.9445
 
 - Ran `experiments/exp00_smoke.py` on 100 human + 100 ChatGPT HC3 English answers

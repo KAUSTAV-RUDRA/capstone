@@ -21,7 +21,7 @@ heldout_domain: null
 attack_types: [clean, paraphrase, back_translation, hybrid]
 
 # Writer L1/L2 bands for the fairness audit (T5).
-writer_l1_bands: [native, non_native, unknown]
+writer_l1_bands: [general, indian, unknown]   # en: general = L1 proxy, indian = Indian-English (L2 proxy)
 
 # Per-sample schema (docs/project-context-master.md §6).
 schema_fields:
@@ -50,3 +50,40 @@ sources:
     - l3cube
     - indian_student_essays
     - toefl_l2
+
+# --- Human corpus builder (src/data/build_human_corpus.py; docs/parts-plan.md Parts 1-3) ---
+# python -m src.data.build_human_corpus --bucket en --target 2200 --config configs/data.yaml
+# Sources per band are pulled in order; max_share caps one source's slice of the
+# band target so later sources still contribute. All en sources are pre-2022.
+human_corpus:
+  output_dir: data/raw/human
+  passage_words: {min: 120, max: 300}       # one passage per source doc, cut at a sentence boundary
+  dedup: {num_perm: 128, threshold: 0.8, shingle_words: 5}   # MinHash LSH over word 5-grams
+  buckets:
+    en:
+      bands:
+        general:            # general human English (L1 proxy for the T5 fairness split)
+          share: 0.5
+          sources:
+            - name: hc3
+              max_share: 0.55
+              subsets: [reddit_eli5, open_qa, wiki_csai]
+              provenance: "HC3 human answers (Guo et al. 2023; Hello-SimpleAI/HC3): ELI5 Reddit 2011-2019, WikiQA 2015, Wikipedia CS/AI intros <=2022; CC-BY-SA-4.0"
+            - name: wikipedia
+              max_share: 1.0
+              config: 20231101.en
+              max_page_id: 2000000        # page ids <= 2M were created before mid-2005 (pre-2020 proxy; text as of the 2023-11-01 dump)
+              domain: wiki_general
+              provenance: "wikimedia/wikipedia 20231101.en, page id <= 2,000,000 (article created <= 2005); CC-BY-SA-4.0"
+        indian:             # Indian-English writers (L2 proxy for the T5 fairness split)
+          share: 0.5
+          sources:
+            - name: samanantar_en
+              max_share: 1.0
+              configs: [hi]               # English side of the en-hi pairs (10.1M rows)
+              domain: news_gov_mixed
+              provenance: "ai4bharat/samanantar v0.3 (2021), English side of en-hi pairs: shuffled sentences from Indian news / PIB / PMIndia <=2020, regrouped into passages; CC-BY-NC-4.0"
+    # Parts 2-3 add sources here (band names for hi/te/cm decided then).
+    hi: {bands: {unknown: {share: 1.0, sources: []}}}
+    te: {bands: {unknown: {share: 1.0, sources: []}}}
+    cm: {bands: {unknown: {share: 1.0, sources: []}}}

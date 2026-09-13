@@ -8,6 +8,7 @@ Serves: cross-cutting, all phases of docs/master-execution-plan.md.
 """
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 from typing import Any
 
@@ -19,14 +20,24 @@ def load_config(path: str | Path) -> dict[str, Any]:
         path: Path to a ``configs/*.yaml`` file.
 
     Returns:
-        Parsed configuration as a nested dict.
+        Parsed configuration as a nested dict (empty dict for an empty file).
     """
-    # TODO(phase-1 step-1.2): implement YAML load via pyyaml.
-    raise NotImplementedError
+    import yaml  # lazy: keeps ``src`` importable with nothing installed
+
+    with open(path, encoding="utf-8") as fh:
+        loaded = yaml.safe_load(fh)
+    if loaded is None:
+        return {}
+    if not isinstance(loaded, dict):
+        raise ValueError(f"{path}: top level must be a mapping, got {type(loaded).__name__}")
+    return loaded
 
 
 def merge_configs(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     """Deep-merge ``override`` onto ``base`` and return a new dict.
+
+    Nested dicts are merged recursively; any other value in ``override``
+    replaces the base value. Neither input is mutated.
 
     Args:
         base: Base configuration (e.g. ``configs/default.yaml``).
@@ -35,8 +46,13 @@ def merge_configs(base: dict[str, Any], override: dict[str, Any]) -> dict[str, A
     Returns:
         The merged configuration.
     """
-    # TODO(phase-1 step-1.2): implement recursive merge.
-    raise NotImplementedError
+    merged = copy.deepcopy(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = merge_configs(merged[key], value)
+        else:
+            merged[key] = copy.deepcopy(value)
+    return merged
 
 
 def get(config: dict[str, Any], dotted_key: str, default: Any = None) -> Any:
@@ -50,5 +66,9 @@ def get(config: dict[str, Any], dotted_key: str, default: Any = None) -> Any:
     Returns:
         The resolved value or ``default``.
     """
-    # TODO(phase-1 step-1.2): implement dotted lookup.
-    raise NotImplementedError
+    current: Any = config
+    for part in dotted_key.split("."):
+        if not isinstance(current, dict) or part not in current:
+            return default
+        current = current[part]
+    return current

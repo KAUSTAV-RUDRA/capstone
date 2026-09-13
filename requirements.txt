@@ -18,6 +18,11 @@ spacy==3.8.4
 stanza==1.10.1
 indic-nlp-library==0.92
 
+# --- Data sources / corpus building (src/data/build_human_corpus.py) ---
+datasets==5.0.1               # HF streaming loaders (wikimedia/wikipedia, ai4bharat/samanantar)
+datasketch==2.0.0             # MinHash LSH near-duplicate filter
+pyarrow==25.0.1               # parquet backend for datasets + results/scores.parquet
+
 # --- Config / utilities ---
 pyyaml==6.0.2
 tqdm==4.67.1
