@@ -146,6 +146,33 @@ is now the subset of the *letters* that are in the script's range.
    length-matching step must equalise this before any head is compared across
    buckets.
 
+## 2026-09-13 — hi / te domain blend (IndicCorpV2 capped at 0.75)
+
+`max_share` on the IndicCorpV2 entries for `hi` and `te` is now **0.75**, so
+Wikipedia supplies the remaining ~25 % of each bucket. Both files were rebuilt
+from scratch rather than resumed, so the mix is right throughout rather than
+only in the rows added last.
+
+| bucket | rows | IndicCorpV2 (news_web) | Wikipedia (wiki_general) | mean words | median |
+|---|---|---|---|---|---|
+| en | 2200 | — | 495 (22 %) | 210.6 | 207 |
+| hi | 2200 | 1650 (75 %) | 550 (25 %) | 175.6 | 159 |
+| te | 2200 | 1650 (75 %) | 550 (25 %) | 170.3 | 155 |
+
+**Why.** With IndicCorpV2 uncapped, `hi` and `te` were 100 % crawled news while
+`en` was a four-domain mix, so any per-bucket difference in T1/T5 would have
+been partly a domain difference rather than a language one. The blend also
+pulls mean length up (164.0 → 175.6 for hi, 161.3 → 170.3 for te), since
+Wikipedia passages are longer, narrowing the gap to `en`. Part 13's
+length-matching still has work to do.
+
+**Wikipedia's rejection rate is much higher for Indic than for English.**
+Hindi rejected 41 % of the articles it read (17 % artefacts) and Telugu 57 %
+(39 % artefacts) — template holes of the `(; )` kind are far more common in the
+Indic dumps than in `20231101.en`. Both still filled their 550-row quota from
+936 (hi) and 1,263 (te) articles read, well inside the `max_page_id: 100000`
+window, so the pre-2020 proxy is not strained.
+
 ---
 
 ## Decisions still open (fill as resolved)

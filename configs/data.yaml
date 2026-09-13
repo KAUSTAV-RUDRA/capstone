@@ -83,17 +83,19 @@ human_corpus:
               configs: [hi]               # English side of the en-hi pairs (10.1M rows)
               domain: news_gov_mixed
               provenance: "ai4bharat/samanantar v0.3 (2021), English side of en-hi pairs: shuffled sentences from Indian news / PIB / PMIndia <=2020, regrouped into passages; CC-BY-NC-4.0"
-    # hi / te: first-language writers, so a single band. IndicCorpV2 is the
-    # primary source and wikipedia is a pure fallback - it is only read if
-    # IndicCorpV2 cannot fill the target. `script` keeps the bucket
-    # monolingual, which per-language calibration depends on.
+    # hi / te: first-language writers, so a single band. IndicCorpV2 is capped
+    # at 0.75 of the bucket so wikipedia contributes the remaining ~25%: that
+    # gives hi/te a news + encyclopedic mix instead of pure news, which keeps
+    # the domain profile closer to en's and stops a per-bucket result from
+    # being partly a domain artefact. `script` keeps the bucket monolingual,
+    # which per-language calibration depends on.
     hi:
       bands:
         native:
           share: 1.0
           sources:
             - name: indiccorp_v2
-              max_share: 1.0
+              max_share: 0.75           # leave ~25% of the bucket for wikipedia (domain blend)
               split: hin_Deva           # NOT a per-language config: one config, language = split
               max_docs: 120000          # only ~7% of docs yield a 120-300 word passage
               script: deva
@@ -114,7 +116,7 @@ human_corpus:
           share: 1.0
           sources:
             - name: indiccorp_v2
-              max_share: 1.0
+              max_share: 0.75           # leave ~25% of the bucket for wikipedia (domain blend)
               split: tel_Telu
               max_docs: 400000          # only ~2% of Telugu docs are long enough
               script: telu
