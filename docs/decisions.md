@@ -424,6 +424,82 @@ prompt, ~860 tokens for Phi te, plus 2,048).
 
 ---
 
+## 2026-09-18 — Indic prompt regime: compliance, not truncation (Part 6)
+
+Telugu generation was stopped at 11.7 tok/s per stream (below the 15 tok/s
+floor) after `en` 730/730 and `hi` 731/731. Chasing the slowdown surfaced a
+larger problem: machine passages are far shorter than the human passages they
+are matched to, and the gap scales with how Indic the bucket is.
+
+| bucket | n | requested | machine | human | machine/human |
+|---|---|---|---|---|---|
+| en | 730 | 211 | 190 | 210 | **0.90** |
+| hi | 731 | 174 | 99 | 174 | **0.57** |
+| te | 12 | 158 | 56 | 153 | **0.37** |
+
+### It is under-production, not truncation
+
+`done_reason` is `stop` on 100 % of those rows and none hit `num_predict`. The
+fertility-aware budget is working as designed; the model simply declines to
+write long Indic text. This is a *different* failure from the cap-clipping
+recorded in section 4 of 2026-09-13, and the lever recorded there — a larger
+`te` cap with `num_ctx` raised — does not address it on its own, because we
+never reach the cap to begin with.
+
+### Prompt probe (12 te passages x 4 variants, qwen2.5:7b-instruct Q4_K_M, temp 0.8)
+
+| variant | words | natural stop | telugu script | 5-gram repeat | m/human |
+|---|---|---|---|---|---|
+| v0 plain (the live template) | 59 | 12/12 | 0.96 | 0.00 | 0.31 |
+| v1 instruction written in Telugu | 76 | 12/12 | 0.99 | 0.01 | 0.40 |
+| v2 compensated target (3x) | 166-170 | 1/12 | 1.00 | 0.01 | 0.88 |
+| v3 explicit "do not stop early" | 116 | 11/12 | 1.00 | 0.00 | 0.62 |
+
+Two readings matter. **v2's 0.88 is not compliance** — 11 of 12 hit the 2,048
+cap at a mean of 2,041 tokens and the tail is cut mid-word, so its true ratio is
+unmeasured. **v3 is a real gain**: it nearly doubles output and still terminates
+naturally 11 times in 12. Quality does not pay for the longer framing — Telugu
+script purity *rises* (0.96 -> 1.00) and 5-gram repetition stays near 0.01, so
+neither script drift nor looping is a cost.
+
+### The cap is a second, independent constraint
+
+At 11.919 tokens/word the human `te` mean of 170 words needs ~2,025 tokens and
+the 300-word tail ~3,575, against a 2,048 cap. Even perfect compliance could not
+represent the upper half of the bucket. Compliance and cap have to move
+together; fixing either alone changes nothing.
+
+### Decision
+
+- **New template for `hi`, `te`, `cm`** (`PROMPT_TEMPLATES["indic"]` plus a
+  rewritten `cm` entry): explicit "at least N words, N/12 or more full
+  sentences, do not stop early and do not summarise".
+- **`en` stays on the plain template.** At 0.90 it needs no fix, and changing it
+  would invalidate 730 finished rows for no gain. **The corpus therefore uses
+  two prompt templates, which the paper's corpus section must state:** `en` is
+  not comparable to `hi`/`te`/`cm` at the prompt level.
+- **Compensated target**: the prompt asks for `human_words / compliance_ratio`,
+  clamped to `cap / fertility` so the ask can never exceed what the cap holds.
+  Ratios are measured *under the template the bucket actually uses* — te 0.62
+  from v3, not 0.31 from v0. Compensating a control-template ratio on top of the
+  new framing would double-count and drive every passage into the cap. hi (0.85)
+  and cm (0.85) are estimates, gated by the check below.
+- **Budget raised**: `num_predict = human_words x fertility x 1.5 + 128`, cap
+  3,600, `num_ctx` 4,608. The base is now the human length, not the requested bin.
+- **Out-of-memory at load drops parallelism** (`load_with_fallback`) instead of
+  ending a multi-hour run; `gemma2:9b` at Q4_K_M is the expected trigger on 8 GB
+  (2026-09-13 section 2). Caveat recorded in the function: the server's
+  `OLLAMA_NUM_PARALLEL` governs slot allocation, so this reduces pressure but
+  cannot shrink an allocation the server already made.
+- **`hi` and `te` rows for qwen7b are discarded and regenerated**, `en` kept.
+  Two prompt regimes inside one bucket would be a confound in exactly the
+  per-language comparison this project reports.
+
+**Gate before committing to the full run:** after the first 24 rows of each
+bucket, stop if machine/human is below 0.75 or more than 20 % hit the cap.
+
+---
+
 ## Decisions still open (fill as resolved)
 
 - [ ] Phase 0.1 — what "patent" means (disclosure / IPR-cell / IPO provisional).

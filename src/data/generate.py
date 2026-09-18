@@ -27,8 +27,8 @@ Assignment
     used.
 
 Token budget
-    ``num_predict = requested_words x fertility(bucket) x 1.3 + 64``, capped at
-    2048, with fertility read from results/tokenizer_fertility.csv for the
+    ``num_predict = human_words x fertility(bucket) x 1.5 + 128``, capped at
+    3600, with fertility read from results/tokenizer_fertility.csv for the
     generator's own tokenizer (the Qwen2.5 row when that is missing). A flat
     words-x-4 budget cut every Hindi and Telugu passage short: Qwen needs 4.8
     tokens per Hindi word and 11.9 per Telugu word. Rows record ``done_reason``
@@ -101,14 +101,26 @@ LANGUAGE_NAMES: dict[str, str] = {
 
 #: Per-bucket instruction. cm needs its own: asking for "Hinglish" alone tends to
 #: produce Devanagari Hindi or formal prose, neither of which matches the human
-#: cm bucket (Romanised, informal).
+#: cm bucket (Romanised, informal). hi/te/cm additionally carry an explicit
+#: "do not stop early" framing: measured 2026-09-18, the plain instruction makes
+#: Qwen stop at 0.31 of the requested Telugu length with done_reason="stop" on
+#: 12 of 12 passages — under-production, not truncation. en stays on the plain
+#: template, which already lands at 0.90 (decisions.md 2026-09-18).
 PROMPT_TEMPLATES: dict[str, str] = {
     "default": ('{first_sentence}\n\nWrite about {n_words} words in {language} '
                 'on this topic, continuing naturally.'),
-    "cm": ('{first_sentence}\n\nWrite about {n_words} words on this topic in casual '
-           'Hindi-English Hinglish, Roman script, the way students text. '
-           'Continue naturally.'),
+    "indic": ('{first_sentence}\n\nContinue this topic in {language} as a complete '
+              'article of at least {n_words} words, written as {n_sentences} or more '
+              'full sentences. Do not stop early and do not summarise; develop the '
+              'topic in detail.'),
+    "cm": ('{first_sentence}\n\nWrite at least {n_words} words on this topic in casual '
+           'Hindi-English Hinglish, Roman script, the way students text, as '
+           '{n_sentences} or more full sentences. Continue naturally and do not stop early.'),
 }
+
+#: Which template each bucket uses. Changing this changes the corpus: rows
+#: generated under different templates are not comparable within a bucket.
+BUCKET_TEMPLATE: dict[str, str] = {"en": "default", "hi": "indic", "te": "indic", "cm": "cm"}
 
 _SENT_END_RE = re.compile(r"(?<=[.!?।॥])\s+")
 _SLUG_RE = re.compile(r"[^A-Za-z0-9]+")
@@ -138,10 +150,11 @@ def length_bin(n_words: int, bins: Sequence[int] = LENGTH_BINS) -> int:
 
 def build_prompt(text: str, bucket: str, n_words: int) -> str:
     """Prompt-matched instruction for one human passage."""
-    template = PROMPT_TEMPLATES.get(bucket, PROMPT_TEMPLATES["default"])
+    template = PROMPT_TEMPLATES[BUCKET_TEMPLATE.get(bucket, "default")]
     return template.format(
         first_sentence=first_sentence(text),
         n_words=n_words,
+        n_sentences=max(8, n_words // 12),
         language=LANGUAGE_NAMES.get(bucket, bucket),
     )
 
@@ -223,6 +236,27 @@ def token_budget(n_words: int, fertility: float, overshoot: float = 1.3,
     return min(cap, int(n_words * fertility * overshoot + pad))
 
 
+#: Measured machine/human word ratio under the template each bucket actually uses
+#: (probe 2026-09-18: 12 te passages x 4 prompt variants; en from 730 finished rows).
+#: te's 0.62 is the ratio under the "indic" template, NOT the 0.31 measured under
+#: the plain one — compensating a control-template ratio on top of the new framing
+#: would double-count and drive every passage into the cap. hi and cm are estimates
+#: until their first rows land; override per bucket in machine_corpus.budget.
+COMPLIANCE_RATIO: dict[str, float] = {"en": 1.0, "hi": 0.85, "te": 0.62, "cm": 0.85}
+
+
+def compensated_words(n_words: int, fertility: float, ratio: float,
+                      cap: int = 2048, floor_ratio: float = 0.25) -> int:
+    """Words to ASK for so the model actually writes about ``n_words``.
+
+    ``n_words / ratio``, clamped to ``cap / fertility``: asking for more words
+    than the token cap can hold only guarantees a truncated passage, which Part
+    13 drops. Never asks for fewer words than the human passage has.
+    """
+    ratio = min(1.0, max(floor_ratio, ratio))
+    return max(n_words, min(int(round(n_words / ratio)), int(cap / fertility)))
+
+
 # --- prompts and output -----------------------------------------------------
 
 def load_prompts(human_dir: Path, buckets: Sequence[str], fraction: float,
@@ -258,6 +292,7 @@ def load_prompts(human_dir: Path, buckets: Sequence[str], fraction: float,
                 "prompt_id": row["id"],
                 "bucket": bucket,
                 "n_words": n_words,
+                "text": row["text"],        # kept so main() can rebuild the prompt once it knows fertility
                 "prompt": build_prompt(row["text"], bucket, n_words),
                 "domain": row.get("domain"),
                 "human_length_words": int(row["length_words"]),
@@ -424,6 +459,36 @@ def describe_ollama_model(client: OllamaClient, model: str) -> dict[str, Any]:
             "parameter_size": details.get("parameter_size"), "digest": digest[:12]}
 
 
+#: Substrings Ollama/llama.cpp use when a load does not fit in VRAM.
+_OOM_MARKERS: tuple[str, ...] = ("out of memory", "insufficient memory", "unable to allocate",
+                                 "failed to allocate", "cudamalloc", "no available slots")
+
+
+def load_with_fallback(client: OllamaClient, model: str, num_ctx: int, keep_alive: str,
+                       parallel: int) -> int:
+    """Load ``model``, halving ``parallel`` while the server reports out of memory.
+
+    A 9B model at Q4_K_M plus KV cache for four slots at this ``num_ctx`` does not
+    fit an 8 GB card — decisions.md 2026-09-13 section 2 flags ``gemma2:9b``
+    specifically — so drop concurrency rather than ending a multi-hour run.
+
+    Caveat: the server's own ``OLLAMA_NUM_PARALLEL`` decides how many slots it
+    allocates. Lowering the client thread count reduces pressure but cannot
+    shrink an allocation the server has already made; if this keeps firing, lower
+    ``OLLAMA_NUM_PARALLEL`` or ``machine_corpus.ollama.num_ctx`` and restart it.
+    """
+    while True:
+        try:
+            client.load(model, num_ctx, keep_alive)
+            return parallel
+        except Exception as exc:  # noqa: BLE001 - the server returns HTTP 500 with a text body
+            if parallel <= 1 or not any(m in str(exc).lower() for m in _OOM_MARKERS):
+                raise
+            parallel = max(1, parallel // 2)
+            log.warning("load hit an out-of-memory error — retrying with parallel=%d (%s)",
+                        parallel, str(exc)[:160])
+
+
 def make_ollama_worker(client: OllamaClient, generator: str, role: str, model: str,
                        info: dict[str, Any], *, temperature: float, top_p: float,
                        num_ctx: int, keep_alive: str, seed: int, retries: int = 1,
@@ -584,8 +649,16 @@ def main(argv: list[str] | None = None) -> None:
                                                  spec.get("tokenizer"),
                                                  budget.get("fallback_tokenizer", "Qwen/Qwen2.5-0.5B"), buckets)
     cap = int(budget.get("cap", 2048))
+    ratios = {**COMPLIANCE_RATIO, **(budget.get("compliance_ratio") or {})}
     for prompt in prompts:
-        prompt["num_predict"] = token_budget(prompt["n_words"], fertility[prompt["bucket"]],
+        bucket = prompt["bucket"]
+        # Ask for more words than we want, because the model writes short (ratio < 1).
+        prompt["ask_words"] = compensated_words(prompt["n_words"], fertility[bucket],
+                                                float(ratios.get(bucket, 1.0)), cap)
+        if prompt["ask_words"] != prompt["n_words"]:
+            prompt["prompt"] = build_prompt(prompt["text"], bucket, prompt["ask_words"])
+        # Budget the passage we WANT (the human length), not the inflated ask.
+        prompt["num_predict"] = token_budget(prompt["human_length_words"], fertility[bucket],
                                              float(budget.get("overshoot", 1.3)),
                                              int(budget.get("pad_tokens", 64)), cap)
     for bucket in buckets:
@@ -613,7 +686,9 @@ def main(argv: list[str] | None = None) -> None:
         log.info("ollama %s: %s (%s, %s, digest %s), %d worker threads",
                  info["server_version"], model, info["parameter_size"], info["quantization"], info["digest"], parallel)
         load_started = time.monotonic()
-        client.load(model, num_ctx, keep_alive)   # so the first requests do not queue behind the load
+        # Load up front so the first requests do not queue behind it, and so an
+        # out-of-memory model is caught here rather than hours into a run.
+        parallel = load_with_fallback(client, model, num_ctx, keep_alive, parallel)
         log.info("model loaded in %.1fs", time.monotonic() - load_started)
         process_item = make_ollama_worker(client, args.generator, spec["role"], model, info,
                                           temperature=temperature, top_p=top_p, num_ctx=num_ctx,

@@ -46,7 +46,8 @@ def test_prompt_is_matched_to_the_human_passage() -> None:
     assert "about 150 words" in prompt               # length match
     assert "in English" in prompt
     hi = generate.build_prompt("यह एक वाक्य है। और दूसरा।", "hi", 200)
-    assert "in Hindi" in hi and "about 200 words" in hi
+    assert "in Hindi" in hi and "at least 200 words" in hi
+    assert "do not stop early" in hi.lower()     # compliance framing (decisions.md 2026-09-18)
 
 
 def test_cm_prompt_asks_for_romanised_informal_hinglish() -> None:
@@ -124,6 +125,16 @@ def test_token_budget_follows_fertility_and_caps() -> None:
     assert generate.token_budget(150, 4.804) == 1000     # hi; the old words x 4 + 64 budget gave 664
     assert generate.token_budget(150, 11.919) == 2048    # te still hits the cap
     assert generate.token_budget(25, 1.672, cap=100) == 100
+
+
+def test_compensated_words_inflates_the_ask_but_never_past_the_cap() -> None:
+    # te: 150 words at ratio 0.62 -> ask ~242, which still fits 3600 tokens at 11.919/word.
+    assert generate.compensated_words(150, 11.919, 0.62, cap=3600) == 242
+    # 300 words would ask 484, but the cap only holds 302 -> clamped, not truncated.
+    assert generate.compensated_words(300, 11.919, 0.62, cap=3600) == 302
+    # en at ratio 1.0 is unchanged, and no bucket is ever asked for fewer words.
+    assert generate.compensated_words(150, 1.339, 1.0, cap=3600) == 150
+    assert generate.compensated_words(150, 1.339, 2.0, cap=3600) == 150
 
 
 def test_load_fertility_prefers_the_generator_tokenizer_then_falls_back() -> None:
