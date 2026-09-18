@@ -212,6 +212,16 @@ machine_corpus:
     fallback_tokenizer: Qwen/Qwen2.5-0.5B   # used when a generator's own tokenizer has no fertility rows
   assignment:
     heldout_share: 0.30             # per held-out generator; the two slices are disjoint
+  # Per-bucket cap on passages PER GENERATOR. Indic decoding is the cost driver:
+  # for Qwen's tokenizer te runs 11.919 tokens/word and hi 4.804, against
+  # English's 1.339 (mGPT, the scorer, sees 6.319 / 3.560 / 1.363). Full
+  # assignments in those buckets dominate generation time. Each cap is selected
+  # stratified across the human length bins and the chosen ids are frozen under
+  # selection_dir (decisions.md 2026-09-18). Generators keep DISJOINT passages:
+  # the shared-panel alternative was declined because it breaks the
+  # one-seen-generator-per-passage rule of decisions.md section 3.
+  bucket_limits: {te: 400, hi: 500}
+  selection_dir: data/processed/selection
   # `ollama` tags resolve to Q4_K_M where such a tag exists (checked against
   # registry.ollama.ai); the default gemma2:9b and phi3.5:3.8b tags are Q4_0,
   # hence their explicit tags. llama3.1 publishes no -instruct or -q4_K_M tag,

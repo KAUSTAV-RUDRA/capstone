@@ -22,12 +22,14 @@ Everything in `docs/execution-plan.md` Part 3 and `docs/master-execution-plan.md
 ## GPU budget (RTX 4060 8GB, realistic)
 | Job | Estimate |
 |---|---|
-| Machine text: ~3,000 prompts × 5 generators × ~250 tokens, 4-bit, batch 8 | 10–14 h |
+| Machine text: ~2,300 prompts × 5 generators (te capped 400, hi 500), 4-bit, batch 8 | 8–12 h |
 | Back-translation: ~6,000 texts × 2 passes, IndicTrans2-1B | 2–3 h |
 | Paraphrase: ~6,000 texts | 3–4 h |
 | Scoring: ~20,000 rows × {mGPT, Qwen, Binoculars pair, MuRIL, XLM-R} | 4–6 h |
-| DetectGPT baseline (100 perturbations): test + cal splits only | 3–4 h |
-| Total | ~25–30 GPU-hours → three overnight runs |
+| Total | ~18–25 GPU-hours → two to three overnight runs |
+
+DetectGPT's 3–4 h baseline row was removed on 2026-09-18 along with the te/hi
+caps and the attack sampling — see decisions.md.
 
 ## Day plan
 | Day | Date | Overnight GPU (autonomous) | Daytime |
@@ -150,9 +152,9 @@ column per method below. Cache to parquet after every column.
    scorer — shows the multilingual-scorer effect vs headB);
    `binoculars` observer Qwen2.5-0.5B / performer Qwen2.5-0.5B-Instruct;
    `xlmr` xlm-roberta-base fine-tuned 2 epochs on the train split, pooled
-   across buckets; save the checkpoint;
-   `detectgpt` vanilla with T5-large mask-filling, 100 perturbations,
-   TEST + CAL splits only (hard stop 4 applies to train).
+   across buckets; save the checkpoint.
+   (Vanilla `detectgpt` was dropped on 2026-09-18 — superseded by
+   `fastdetectgpt_en`, an identical statistic computed analytically. decisions.md.)
 5. Sanity table: single-column AUROC per bucket on test (seen generators).
    Append to docs/progress.md. Commit "scores: all methods cached". Stop.
 ```

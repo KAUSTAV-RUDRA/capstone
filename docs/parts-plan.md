@@ -122,7 +122,7 @@ Done when: all five `data/raw/machine/<alias>.jsonl` files report "complete".
 
 ---
 
-## STAGE 4 — CLEAN, FREEZE, SCORE  (Parts 13–20)
+## STAGE 4 — CLEAN, FREEZE, SCORE  (Parts 13–18)
 
 ### Part 13 — Clean, length-match, freeze (1 h, no GPU)
 ```
@@ -181,13 +181,12 @@ Register "xlmr": fine-tune xlm-roberta-base 2 epochs on the train split
 results/models/xlmr/; score all rows. Run. AUROC. Commit.
 ```
 
-### Part 19–20 — DetectGPT vanilla baseline (2 × 2 h)
-```
-Register "detectgpt": T5-large mask-fill perturbations (100 per text, 15%
-span mask), scorer Qwen2.5-0.5B, TEST + CALIBRATION splits only. Run with
---max-minutes 110 until complete (2 sittings). AUROC. Commit.
-```
-Done when Stage 4 ends: `results/scores.parquet` has all 8 method columns for all rows.
+Done when Stage 4 ends: `results/scores.parquet` has all 7 method columns for all rows.
+
+> Parts 19–20 (vanilla DetectGPT) were **deleted on 2026-09-18** — Fast-DetectGPT
+> is its efficient successor with an identical statistic, so running both cost two
+> GPU sittings for no extra evidence. Baselines are ppl, fastdetectgpt_en,
+> binoculars, xlmr. See decisions.md.
 
 ---
 
@@ -225,30 +224,31 @@ docs/results/README.md: one paragraph per table with key numbers. Commit.
 
 ---
 
-## STAGE 6 — ADVERSARIAL  (Parts 23–28, GPU)
+## STAGE 6 — ADVERSARIAL  (Parts 23–26, GPU)
 
 ### Part 23 — Attack CLI + hybrid attack (1 h, no GPU)
 ```
-Fill in src/data/attack.py. Input: machine TEST rows all buckets + 300
-human TEST rows per bucket. "hybrid": 20% of sentences get one of {synonym
+Fill in src/data/attack.py. Input: TEST-split rows only, sampled per bucket
+per attack — <=400 machine + 150 human, stratified by length bin and by
+generator so every generator stays represented. "hybrid": 20% of sentences get one of {synonym
 swap (WordNet for en; small hi/te synonym lists), clause reorder,
 split/merge}. Ids suffixed _hyb, attack_type="hybrid", appended to
 data/processed/attacked.jsonl. Run it. Commit.
 ```
-### Parts 24–25 — Paraphrase attack (2 × 2 h)
+### Part 24 — Paraphrase attack (1 × 2 h)
 ```
 python -m src.data.attack --attack paraphrase --max-minutes 110
 (Qwen/Qwen2.5-7B-Instruct 4-bit: "Rewrite in your own words, same
 language, same length"; suffix _para)
 ```
-### Parts 26–27 — Back-translation attack (2 × 1.5 h)
+### Part 25 — Back-translation attack (1 × 1.5 h)
 ```
 python -m src.data.attack --attack backtranslation --max-minutes 90
 (ai4bharat/indictrans2-en-indic-1B + indic-en-1B: en→hi→en, hi→en→hi,
 te→en→te; cm: Devanagari-normalise via indic-nlp-library, hi→en→hi,
 re-romanise; suffix _bt)
 ```
-### Part 28 — Rescore attacked rows (2 h)
+### Part 26 — Rescore attacked rows (2 h)
 ```
 python -m src.eval.score --all-columns --only-attacked --max-minutes 110
 (run until complete). Then T4: AUROC, TPR@tau_0.01, FPR@tau_0.01 per
@@ -274,5 +274,7 @@ re-run Part 22 tables. Update docs/results/README.md. Commit.
 ---
 
 ## Total
-GPU parts: ~15 sittings (Stages 3, 4, 6). Non-GPU parts: ~10 sittings. Paper/deck: mine.
-At one sitting a day → ~3.5 weeks. At two a day → ~2 weeks.
+GPU parts: ~11 sittings (Stages 3, 4, 6) after the 2026-09-18 scope cuts — vanilla
+DetectGPT dropped (−2) and the four attack sittings collapsed to two (−2).
+Non-GPU parts: ~10 sittings. Paper/deck: mine.
+At one sitting a day → ~3 weeks. At two a day → ~1.5 weeks.

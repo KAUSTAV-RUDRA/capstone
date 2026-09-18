@@ -135,13 +135,11 @@ def score_xlmr(texts, rows, ctx):
     )
 
 
-@register("detectgpt", "Baseline: DetectGPT, T5-large perturbations, test+cal only (Parts 19-20)")
-def score_detectgpt(texts, rows, ctx):
-    raise NotImplementedError(
-        "detectgpt lands in parts-plan Parts 19-20: 100 T5-large mask-fill perturbations per "
-        "text at 15% span masking, scorer Qwen2.5-0.5B. TEST + CALIBRATION splits only — "
-        "the train split would cost days for no benefit."
-    )
+# NOTE: the "detectgpt" column was dropped on 2026-09-18 (decisions.md). Vanilla
+# DetectGPT is superseded by Fast-DetectGPT, which is retained above with an
+# identical statistic; running both cost two GPU sittings for no extra evidence.
+# The paper still cites Mitchell et al. 2023 as the origin of the curvature
+# hypothesis. src/baselines/detectgpt.py is left in place but unregistered.
 
 
 # ---------------------------------------------------------------------------

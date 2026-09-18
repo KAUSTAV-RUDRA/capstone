@@ -14,15 +14,19 @@ RAID/DetectRL practice:
     Models the realistic case of a student editing generated text. Part 23.
 ``paraphrase``
     Qwen2.5-7B-Instruct 4-bit: "Rewrite in your own words, same language, same
-    length". Parts 24-25.
+    length". Part 24.
 ``backtranslation``
     IndicTrans2 en<->indic: en->hi->en, hi->en->hi, te->en->te; for cm,
     Devanagari-normalise via indic-nlp-library, hi->en->hi, then re-romanise.
-    Parts 26-27.
+    Part 25.
 
-Input is machine TEST rows across all buckets plus 300 human TEST rows per
-bucket — human rows are attacked too, or a rise in false positives under attack
-would be invisible. Output rows keep the source id with a suffix (``_hyb``,
+Input is TEST-split rows only, sampled per bucket per attack: at most
+``MACHINE_ROWS_PER_BUCKET`` machine rows and ``HUMAN_ROWS_PER_BUCKET`` human
+rows, stratified by length bin and by generator so no generator drops out of the
+table. Human rows are attacked too, or a rise in false positives under attack
+would be invisible. T4 needs a precise estimate of degradation, not the whole
+test set: 400 rows per cell holds the standard error on AUROC under 0.02
+(decisions.md 2026-09-18). Output rows keep the source id with a suffix (``_hyb``,
 ``_para``, ``_bt``), set ``attack_type``, and are appended to
 ``data/processed/attacked.jsonl``.
 
@@ -52,12 +56,16 @@ DEFAULT_ATTACKED = "data/processed/attacked.jsonl"
 #: CLI name -> (schema attack_type, id suffix, implementing part).
 ATTACKS: dict[str, tuple[str, str, str]] = {
     "hybrid": ("hybrid", "_hyb", "Part 23"),
-    "paraphrase": ("paraphrase", "_para", "Parts 24-25"),
-    "backtranslation": ("back_translation", "_bt", "Parts 26-27"),
+    "paraphrase": ("paraphrase", "_para", "Part 24"),
+    "backtranslation": ("back_translation", "_bt", "Part 25"),
 }
 
+#: Machine TEST rows attacked per bucket per attack, stratified by length bin and
+#: by generator. 400 per cell keeps the standard error on AUROC under 0.02, which
+#: is the precision T4 needs (decisions.md 2026-09-18).
+MACHINE_ROWS_PER_BUCKET = 400
 #: Human TEST rows attacked per bucket, so attacked false positives stay measurable.
-HUMAN_ROWS_PER_BUCKET = 300
+HUMAN_ROWS_PER_BUCKET = 150
 #: Fraction of sentences edited by the hybrid attack.
 HYBRID_EDIT_FRACTION = 0.2
 
@@ -70,9 +78,12 @@ def attacked_id(row_id: str, attack: str) -> str:
 
 
 def select_rows(corpus_path: Path, config: dict[str, Any]) -> list[dict[str, Any]]:
-    """Machine TEST rows (all buckets) + HUMAN_ROWS_PER_BUCKET human TEST rows per bucket."""
-    # TODO(stage-6 part-23): read corpus.jsonl, filter split == "test", take all
-    # machine rows plus a seeded sample of human rows per bucket.
+    """Sampled TEST rows per bucket: <= MACHINE_ROWS_PER_BUCKET machine + HUMAN_ROWS_PER_BUCKET human."""
+    # TODO(stage-6 part-23): read corpus.jsonl, filter split == "test", then per
+    # bucket take a seeded stratified sample — machine rows balanced across length
+    # bin AND generator so every generator stays represented, human rows across
+    # length bin. Never attack train or cal rows: T4 measures degradation on test,
+    # and attacking cal rows would contaminate the conformal thresholds.
     raise NotImplementedError("select_rows lands in parts-plan Part 23")
 
 
@@ -84,15 +95,15 @@ def apply_hybrid(texts: Sequence[str], buckets: Sequence[str]) -> list[str]:
 
 def apply_paraphrase(texts: Sequence[str], buckets: Sequence[str], config: dict[str, Any]) -> list[str]:
     """Rewrite each text with Qwen2.5-7B-Instruct 4-bit, same language and length."""
-    # TODO(stage-6 parts-24-25): batch prompts through the 4-bit generator.
-    raise NotImplementedError("apply_paraphrase lands in parts-plan Parts 24-25")
+    # TODO(stage-6 part-24): batch prompts through the 4-bit generator.
+    raise NotImplementedError("apply_paraphrase lands in parts-plan Part 24")
 
 
 def apply_backtranslation(texts: Sequence[str], buckets: Sequence[str], config: dict[str, Any]) -> list[str]:
     """Round-trip each text through IndicTrans2 and back into its own language."""
-    # TODO(stage-6 parts-26-27): en->hi->en, hi->en->hi, te->en->te; cm via
+    # TODO(stage-6 part-25): en->hi->en, hi->en->hi, te->en->te; cm via
     # Devanagari normalisation, hi->en->hi, then re-romanisation.
-    raise NotImplementedError("apply_backtranslation lands in parts-plan Parts 26-27")
+    raise NotImplementedError("apply_backtranslation lands in parts-plan Part 25")
 
 
 def main(argv: list[str] | None = None) -> None:

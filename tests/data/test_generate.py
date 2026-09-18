@@ -127,6 +127,20 @@ def test_token_budget_follows_fertility_and_caps() -> None:
     assert generate.token_budget(25, 1.672, cap=100) == 100
 
 
+def test_stratified_cap_preserves_the_bin_mix_and_is_deterministic() -> None:
+    prompts: list[dict] = []
+    for bin_words, n in ((100, 200), (150, 1000), (200, 400)):   # 1600 total
+        prompts.extend({"id": f"te-{bin_words}-{i:05d}", "n_words": bin_words} for i in range(n))
+    ids = generate.stratified_cap(prompts, 400)                  # exactly a quarter of each bin
+    assert len(ids) == len(set(ids)) == 400
+    chosen = set(ids)
+    got = {b: sum(1 for p in prompts if p["id"] in chosen and p["n_words"] == b)
+           for b in (100, 150, 200)}
+    assert got == {100: 50, 150: 250, 200: 100}, got
+    assert generate.stratified_cap(prompts, 400) == ids          # deterministic, not salted
+    assert generate.stratified_cap(prompts, 5000) == [p["id"] for p in prompts]
+
+
 def test_compensated_words_inflates_the_ask_but_never_past_the_cap() -> None:
     # te: 150 words at ratio 0.62 -> ask ~242, which still fits 3600 tokens at 11.919/word.
     assert generate.compensated_words(150, 11.919, 0.62, cap=3600) == 242

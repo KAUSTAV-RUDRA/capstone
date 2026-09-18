@@ -207,6 +207,62 @@ def make_assignment(generator: str, generators: dict[str, dict[str, Any]],
     raise KeyError(f"generator '{generator}' has no seen/heldout role")
 
 
+# --- per-bucket caps --------------------------------------------------------
+
+def stratified_cap(prompts: Sequence[dict[str, Any]], limit: int) -> list[str]:
+    """Ids of ``limit`` prompts, keeping the length-bin distribution of the input.
+
+    Largest-remainder allocation across the bins, then a deterministic pick
+    inside each bin ordered by ``sha256(id)``. Stable across runs and machines,
+    and independent of whatever order the human corpus happens to be in, so the
+    same generator always selects the same passages.
+    """
+    if limit >= len(prompts):
+        return [p["id"] for p in prompts]
+    by_bin: dict[int, list[dict[str, Any]]] = {}
+    for prompt in prompts:
+        by_bin.setdefault(prompt["n_words"], []).append(prompt)
+    exact = {b: limit * len(ps) / len(prompts) for b, ps in by_bin.items()}
+    take = {b: int(v) for b, v in exact.items()}
+    order = sorted(by_bin, key=lambda b: (exact[b] - take[b], b), reverse=True)
+    index = 0
+    while sum(take.values()) < limit:          # largest remainder first, then by bin
+        take[order[index % len(order)]] += 1
+        index += 1
+    chosen: list[str] = []
+    for bin_words, in_bin in by_bin.items():
+        ranked = sorted(in_bin, key=lambda p: _hash64(p["id"]))
+        chosen.extend(p["id"] for p in ranked[:take[bin_words]])
+    return sorted(chosen)
+
+
+def load_or_record_selection(path: Path, prompts: Sequence[dict[str, Any]], limit: int,
+                             bucket: str, generator: str) -> set[str]:
+    """Frozen ids for a capped bucket: computed and written once, reused after.
+
+    The selection is deterministic, so this file is a record rather than the
+    source of truth — but recording it means a later edit to the selection rule
+    cannot silently change a corpus that is already half generated.
+    """
+    if path.exists():
+        record = json.loads(path.read_text(encoding="utf-8"))
+        log.info("bucket %s: reusing frozen selection of %d ids from %s",
+                 bucket, len(record["ids"]), path)
+        return set(record["ids"])
+    ids = stratified_cap(prompts, limit)
+    chosen = set(ids)
+    bins: dict[int, int] = {}
+    for prompt in prompts:
+        if prompt["id"] in chosen:
+            bins[prompt["n_words"]] = bins.get(prompt["n_words"], 0) + 1
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"generator": generator, "bucket": bucket, "limit": limit,
+                                "selected_from": len(prompts), "n": len(ids),
+                                "bins": dict(sorted(bins.items())), "ids": ids},
+                               indent=1), encoding="utf-8")
+    return chosen
+
+
 # --- token budget -----------------------------------------------------------
 
 def load_fertility(csv_path: str | Path, tokenizer: str | None, fallback: str,
@@ -643,6 +699,21 @@ def main(argv: list[str] | None = None) -> None:
     if not prompts:
         print("no prompts — is the human corpus built?")
         return
+
+    # Per-bucket caps (te: Telugu decode cost, decisions.md 2026-09-18). The kept
+    # ids are frozen to disk so every later run of this generator selects the same
+    # passages, and so the selection is auditable rather than implicit.
+    selection_dir = Path(mc.get("selection_dir", "data/processed/selection"))
+    for bucket, raw_limit in (mc.get("bucket_limits") or {}).items():
+        in_bucket = [p for p in prompts if p["bucket"] == bucket]
+        limit = int(raw_limit)
+        if not in_bucket or len(in_bucket) <= limit:
+            continue
+        record = selection_dir / f"{generator_slug(args.generator)}__{bucket}.json"
+        keep_ids = load_or_record_selection(record, in_bucket, limit, bucket, args.generator)
+        prompts = [p for p in prompts if p["bucket"] != bucket or p["id"] in keep_ids]
+        log.info("bucket %s capped to %d of %d passages (%s)",
+                 bucket, len(keep_ids), len(in_bucket), record)
 
     budget = mc.get("budget") or {}
     fertility, fertility_source = load_fertility(budget.get("fertility_csv", "results/tokenizer_fertility.csv"),
