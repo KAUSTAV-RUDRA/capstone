@@ -578,6 +578,135 @@ four).
 
 ---
 
+## 2026-09-18 — cm over-production: the sentence floor, not the framing
+
+The Indic regime was applied to `cm` on the assumption that it behaved like `hi`
+and `te`. It does not, and 470 `cm` rows were generated at **1.88 of human
+length** (median 1.98, p90 4.94, 91 % above 1.25x) before the gate caught it —
+the gate as first written only tested the *lower* bound and waved a 1.72 through
+as a pass.
+
+### Attribution
+
+| bucket | human | bin | ask | machine | ask/bin | mach/ask | mach/hum |
+|---|---|---|---|---|---|---|---|
+| en | 210 | 211 | 211 | 190 | 1.00 | 0.90 | 0.90 |
+| cm | 74 | 75 | 88 | 139 | 1.18 | **1.59** | **1.88** |
+| te | 163 | 166 | 250 | 154 | 1.50 | 0.62 | 0.94 |
+
+Length binning was *not* the cause (`bin/hum` = 1.00). Splitting `cm` by whether
+the `max(8, n/12)` sentence floor was active:
+
+| group | n | human | ask | sentences | machine | mach/hum |
+|---|---|---|---|---|---|---|
+| floor binds (ask < 96) | 278 | 34 | 39 | 8.0 | 91 | **2.69** |
+| floor free (ask >= 96) | 192 | 133 | 157 | 12.4 | 209 | 1.58 |
+
+Eight sentences implies ~88 words regardless of the word target, so the sentence
+clause silently overrode the word clause. Worst case: 21 human words asked for
+"29 words / 8 or more sentences" produced 84 words, **4.0x**.
+
+### Probe: 12 cm passages x 3 variants, ask = bin, no compensation
+
+| variant | m/hum | m/ask | short subset (<40 w) |
+|---|---|---|---|
+| plain original template | 0.76 | 0.78 | 0.73x |
+| sentence floor fixed, `max(2, n/15)` | **1.08** | 1.10 | 1.20x |
+| sentence clause removed entirely | 0.78 | 0.79 | 0.71x |
+
+**Both predictions were wrong, and that is the corpus-section finding.** The
+expectation on both sides was that `cm` should revert to the plain template — that
+the insistent framing was simply wrong for a bucket which had never
+under-produced. The data says the opposite: without the sentence clause `cm`
+under-produces at 0.76, and "do not stop early" on its own does nothing (0.78 is
+within noise of 0.76). `cm` **needs** the sentence clause; only the floor was
+wrong — `max(2, n/15)`, not `max(8, ...)`.
+
+The general lesson, which the paper should state: prompt-length behaviour does
+not transfer between buckets by analogy. `en` at 0.90 predicted nothing about
+`cm`, and `te`'s under-production predicted nothing about either. Every bucket's
+regime is now measured on a 12-passage probe **before** its rows are generated,
+not diagnosed from 24 rows afterwards.
+
+### Decision
+
+- `sentence_target()` splits the rule: `cm` uses `max(2, n/15)`, hi/te keep
+  `max(8, n/12)`. Their bins are all >= 100, so the floor never bound for them
+  and their prompts are byte-identical — the 56 good `te` rows stay valid.
+- `cm` compliance ratio 0.85 -> **1.0**. It writes 1.10x what it is asked for, so
+  compensation would overshoot. Note `compensated_words` cannot express a ratio
+  above 1.0 (it never asks for fewer words than the human passage); tuning `cm`
+  below 1.0 would need that constraint relaxed.
+- **The gate gains an upper bound.** Failing only below 0.75 is what let this run
+  to 470 rows; it now fails outside ~0.75-1.25 in both directions.
+
+**Carry into Limitations:** `cm` machine length is prompt-steered by a sentence
+count rather than a word count, because the model ignores word targets on short
+Romanised text.
+
+---
+
+## 2026-09-18 — hi regime, and the per-bucket prompt table
+
+`hi` was probed **before** generating its 500 rows rather than after 24, which is
+the practice cm's failure forced. It paid for itself immediately.
+
+### Probe: 12 hi passages x 3 variants, ask = bin, no compensation
+
+| variant | machine | m/hum | m/ask | done_reason |
+|---|---|---|---|---|
+| plain original | 101 | **0.57** | 0.55 | 12 stop |
+| insistent + sentence clause | 248 | **1.40** | 1.35 | 10 stop, 2 length |
+| insistent, no sentence clause | 215 | **1.21** | 1.17 | 11 stop, 1 length |
+
+The regime `hi` was about to run — insistent framing with compensation 0.85 —
+would have produced **~1.59** of human length: a 1.35 over-producer with its ask
+inflated a further 1.18x. That is cm's failure repeated, caught before the rows
+existed. Note also that the plain template reproduces **0.57**, exactly the ratio
+the real 731-row `hi` corpus showed, which is independent confirmation that a
+12-passage probe predicts bucket behaviour well enough to configure from.
+
+### Why `hi` takes the plain template, not the best raw ratio
+
+On raw numbers v2 (1.21) is closest to 1.0, and the obvious move is to set
+`compliance_ratio: 1.17` and divide it back down. That does not work:
+`compensated_words` only ever *inflates* the ask — it clamps `ratio <= 1.0` and
+never asks for fewer words than the human passage. A 1.17 in the config would be
+silently clamped to 1.0, the ask would be unchanged, and `hi` would generate at
+1.21 while the config claimed otherwise.
+
+Relaxing that clamp was considered and **rejected**: it widens a core function's
+contract to serve one bucket, and the alternative needs no code change at all.
+Since compensation can only correct *under*-production, the right template for
+`hi` is the one it under-produces under — the plain one, at 0.55. The ask is
+inflated x1.8, exactly the mechanism `te` already uses (x1.6 -> 0.94 measured on
+56 real rows).
+
+`hi` is therefore the plain template at ratio 0.55, and the rule generalises:
+**pick the template whose bias the existing mechanism can correct.** Two
+independent measurements support the value — the probe (0.55) and the real
+731-row `hi` corpus generated under that template (0.57).
+
+### Per-bucket prompt regime — for the paper's corpus section
+
+**Every value measured on that bucket's own probe. None of it transfers by
+analogy:** `en` at 0.90 predicted nothing about `cm`, and `te`'s under-production
+predicted nothing about `hi`.
+
+| bucket | template | compliance ratio | effect on the ask | measured machine/human |
+|---|---|---|---|---|
+| en | plain "write about N words" | 1.00 | unchanged | **0.90** (730 rows) |
+| hi | plain "write about N words" | 0.55 | inflates to 1.82n | 0.55-0.57 of ask → ~1.00 expected |
+| te | insistent + sentence clause | 0.62 | inflates to 1.61n | **0.94** (56 rows) |
+| cm | insistent + sentence clause, floor `max(2, n/15)` | 1.00 | unchanged | **1.08** (probe) |
+
+Four buckets, three different templates and three different ratios. The corpus
+section must state this: prompt regime is a per-bucket empirical choice, not a
+single design applied uniformly, and `en` in particular is not comparable to the
+other three at the prompt level.
+
+---
+
 ## Decisions still open (fill as resolved)
 
 - [ ] Phase 0.1 — what "patent" means (disclosure / IPR-cell / IPO provisional).

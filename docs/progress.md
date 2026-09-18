@@ -7,12 +7,38 @@ Newest entries at the top.
 
 ## 2026-09-18 — Part 6 (in progress): qwen7b machine text
 
-- `qwen7b` machine corpus stands at **en 730/730, hi 731/731, te 12/712,
-  cm 0/701**. The run was stopped after 39 min: Telugu per-stream decode fell to
-  11.7 tok/s (below the 15 tok/s floor) and machine `te` is averaging 56 words
-  against 153 for the human passages it mirrors, so the rows would not survive
-  Part 13's per-bin length matching. `data/` is gitignored, so this log is the
-  record rather than a commit.
+Three halted runs in one sitting, all for length-matching defects. The failures
+are the useful part and some of this belongs in the paper's corpus section.
+
+- **Run 1 halted (39 min).** Telugu per-stream decode fell to 11.7 tok/s, below
+  the 15 tok/s floor. Chasing that surfaced the real problem: machine `te` was
+  56 words against 153 human, **0.37**, with `done_reason: stop` on 100 % of rows
+  and nothing at the cap — *under-production, not truncation*. `hi` was 0.57 on
+  the same fault; `en` was fine at 0.90.
+- **Fix.** A 4-variant probe showed an explicit "at least N words / N or more
+  sentences / do not stop early" framing nearly doubles Indic output with no loss
+  of script purity (0.96 → 1.00) and no repetition. Budget raised to
+  `human_words x fertility x 1.5 + 128`, cap 3600, `num_ctx` 4608. `hi`/`te` rows
+  discarded and regenerated; `en` kept — it needs no fix, so **the corpus now
+  runs two prompt templates**, which the paper must state.
+- **Scope cuts:** te capped at 400 and hi at 500 per generator, stratified across
+  the human length bins with the ids frozen under `data/processed/selection/`;
+  vanilla DetectGPT dropped (7 score columns, not 8); attacks sample the test
+  split. See decisions.md.
+- **Run 2 halted** to reorder buckets so the `cm`/`hi` gates would fire early.
+- **Run 3 halted (470 cm rows discarded).** `cm` generated at **1.88** of human
+  length — median 1.98, p90 4.94, 91 % above 1.25x. Cause: the `max(8, n/12)`
+  sentence floor. Eight sentences implies ~88 words whatever the word target
+  says, so a 21-word passage was asked for "29 words / 8 or more sentences" and
+  wrote 84 (**4.0x**). The gate missed it because it only tested the *lower*
+  bound and passed a 1.72. Fixed: `cm` uses `max(2, n/15)`, hi/te keep
+  `max(8, n/12)` (their bins are all >= 100, so their prompts are unchanged and
+  the 56 good `te` rows stay valid); gate now fails outside 0.75–1.25.
+- **Measured, not assumed:** a cm probe showed the plain template *under*-produces
+  at 0.76 — `cm` needs the sentence clause, just not that floor. `hi` gets the
+  same probe before its 500 rows are generated rather than after 24.
+- State at the end of the sitting: **en 730/730 (0.90), te 56/400 (0.94),
+  cm 0/701, hi 0/500**. `data/` is gitignored, so this log is the record.
 
 ---
 

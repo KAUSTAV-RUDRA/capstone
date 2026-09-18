@@ -46,8 +46,11 @@ def test_prompt_is_matched_to_the_human_passage() -> None:
     assert "about 150 words" in prompt               # length match
     assert "in English" in prompt
     hi = generate.build_prompt("यह एक वाक्य है। और दूसरा।", "hi", 200)
-    assert "in Hindi" in hi and "at least 200 words" in hi
-    assert "do not stop early" in hi.lower()     # compliance framing (decisions.md 2026-09-18)
+    assert "in Hindi" in hi and "about 200 words" in hi   # hi is on the PLAIN template:
+    assert "do not stop early" not in hi.lower()          # it over-produces under framing
+    te = generate.build_prompt("ఇది ఒక వాక్యం. రెండు.", "te", 200)
+    assert "in Telugu" in te and "at least 200 words" in te
+    assert "do not stop early" in te.lower()     # compliance framing (decisions.md 2026-09-18)
 
 
 def test_cm_prompt_asks_for_romanised_informal_hinglish() -> None:
@@ -127,6 +130,19 @@ def test_token_budget_follows_fertility_and_caps() -> None:
     assert generate.token_budget(25, 1.672, cap=100) == 100
 
 
+def test_cm_short_passage_is_not_asked_for_eight_sentences() -> None:
+    # Regression: a floor of 8 sentences implies ~88 words whatever the word target
+    # says, and drove 21-word cm passages to 84 machine words (decisions.md 2026-09-18).
+    short = generate.build_prompt("Yaar yeh movie bahut acchi thi.", "cm", 25)
+    assert "2 or more full sentences" in short, short
+    assert "8 or more" not in short
+    assert generate.sentence_target("cm", 25) == 2
+    # te keeps the indic floor — its bins are all >= 100, so the floor never bound
+    # there, which is why the 56 te rows generated before the fix stay valid.
+    assert generate.sentence_target("te", 100) == 8
+    assert "8 or more full sentences" in generate.build_prompt("ఇది ఒక వాక్యం.", "te", 100)
+
+
 def test_stratified_cap_preserves_the_bin_mix_and_is_deterministic() -> None:
     prompts: list[dict] = []
     for bin_words, n in ((100, 200), (150, 1000), (200, 400)):   # 1600 total
@@ -146,7 +162,10 @@ def test_compensated_words_inflates_the_ask_but_never_past_the_cap() -> None:
     assert generate.compensated_words(150, 11.919, 0.62, cap=3600) == 242
     # 300 words would ask 484, but the cap only holds 302 -> clamped, not truncated.
     assert generate.compensated_words(300, 11.919, 0.62, cap=3600) == 302
-    # en at ratio 1.0 is unchanged, and no bucket is ever asked for fewer words.
+    # hi: 150 words at 0.55 -> ask 273, well inside the 749 words 3600 tokens holds.
+    assert generate.compensated_words(150, 4.804, 0.55, cap=3600) == 273
+    # en at ratio 1.0 is unchanged, and no bucket is ever asked for fewer words:
+    # the ratio only inflates, so a value above 1 is a no-op, not a shrink.
     assert generate.compensated_words(150, 1.339, 1.0, cap=3600) == 150
     assert generate.compensated_words(150, 1.339, 2.0, cap=3600) == 150
 

@@ -101,11 +101,18 @@ LANGUAGE_NAMES: dict[str, str] = {
 
 #: Per-bucket instruction. cm needs its own: asking for "Hinglish" alone tends to
 #: produce Devanagari Hindi or formal prose, neither of which matches the human
-#: cm bucket (Romanised, informal). hi/te/cm additionally carry an explicit
-#: "do not stop early" framing: measured 2026-09-18, the plain instruction makes
-#: Qwen stop at 0.31 of the requested Telugu length with done_reason="stop" on
-#: 12 of 12 passages — under-production, not truncation. en stays on the plain
-#: template, which already lands at 0.90 (decisions.md 2026-09-18).
+#: cm bucket (Romanised, informal). te and cm carry an explicit "do not stop
+#: early" framing: measured 2026-09-18, the plain instruction makes Qwen stop at
+#: 0.31 of the requested Telugu length with done_reason="stop" on 12 of 12
+#: passages — under-production, not truncation.
+#:
+#: en and hi both stay on the plain template, for different reasons. en lands at
+#: 0.90 as-is. hi *over*-produces under the insistent framing (1.40 with the
+#: sentence clause, 1.21 without) but under-produces at 0.57 on the plain one —
+#: and compensation can only inflate the ask, so the plain template is the one
+#: the existing mechanism can correct, exactly as it corrects te. Every bucket's
+#: behaviour was measured on its own probe — none of it transfers by analogy
+#: (decisions.md 2026-09-18).
 PROMPT_TEMPLATES: dict[str, str] = {
     "default": ('{first_sentence}\n\nWrite about {n_words} words in {language} '
                 'on this topic, continuing naturally.'),
@@ -120,7 +127,7 @@ PROMPT_TEMPLATES: dict[str, str] = {
 
 #: Which template each bucket uses. Changing this changes the corpus: rows
 #: generated under different templates are not comparable within a bucket.
-BUCKET_TEMPLATE: dict[str, str] = {"en": "default", "hi": "indic", "te": "indic", "cm": "cm"}
+BUCKET_TEMPLATE: dict[str, str] = {"en": "default", "hi": "default", "te": "indic", "cm": "cm"}
 
 _SENT_END_RE = re.compile(r"(?<=[.!?।॥])\s+")
 _SLUG_RE = re.compile(r"[^A-Za-z0-9]+")
@@ -148,13 +155,30 @@ def length_bin(n_words: int, bins: Sequence[int] = LENGTH_BINS) -> int:
     return min(bins, key=lambda b: abs(b - n_words))
 
 
+def sentence_target(bucket: str, n_words: int) -> int:
+    """Sentences to ask for alongside the word target.
+
+    cm needs its own rule. Its human passages average 57 words, and a floor of 8
+    sentences implies ~88 words whatever the word target says — measured
+    2026-09-18, that drove cm passages of 21 human words to 84 machine words
+    (4.0x), because the sentence clause silently overrides the word clause.
+    ``max(2, n/15)`` lands cm at 1.08 of human length.
+
+    hi/te keep ``max(8, n/12)``: their bins are all >= 100, so the floor never
+    binds there and this leaves their prompts byte-identical.
+    """
+    if BUCKET_TEMPLATE.get(bucket) == "cm":
+        return max(2, n_words // 15)
+    return max(8, n_words // 12)
+
+
 def build_prompt(text: str, bucket: str, n_words: int) -> str:
     """Prompt-matched instruction for one human passage."""
     template = PROMPT_TEMPLATES[BUCKET_TEMPLATE.get(bucket, "default")]
     return template.format(
         first_sentence=first_sentence(text),
         n_words=n_words,
-        n_sentences=max(8, n_words // 12),
+        n_sentences=sentence_target(bucket, n_words),
         language=LANGUAGE_NAMES.get(bucket, bucket),
     )
 
@@ -296,9 +320,18 @@ def token_budget(n_words: int, fertility: float, overshoot: float = 1.3,
 #: (probe 2026-09-18: 12 te passages x 4 prompt variants; en from 730 finished rows).
 #: te's 0.62 is the ratio under the "indic" template, NOT the 0.31 measured under
 #: the plain one — compensating a control-template ratio on top of the new framing
-#: would double-count and drive every passage into the cap. hi and cm are estimates
-#: until their first rows land; override per bucket in machine_corpus.budget.
-COMPLIANCE_RATIO: dict[str, float] = {"en": 1.0, "hi": 0.85, "te": 0.62, "cm": 0.85}
+#: would double-count and drive every passage into the cap.
+#:
+#: Measured per bucket on its own 12-passage probe, 2026-09-18:
+#:   en 1.0   plain template, 0.90 as-is, no correction needed
+#:   hi 0.55  plain template, under which it writes 0.55-0.57x the ask - so the
+#:            ask is inflated x1.8, the same correction te gets. Two independent
+#:            measurements agree: the probe (0.55) and the real 731-row hi
+#:            corpus generated under this template (0.57)
+#:   te 0.62  insistent template, measured under that template (not the 0.31 the
+#:            plain one gave) - compensating a control ratio would double-count
+#:   cm 1.0   insistent template with the fixed sentence floor; 1.08 as-is
+COMPLIANCE_RATIO: dict[str, float] = {"en": 1.0, "hi": 0.55, "te": 0.62, "cm": 1.0}
 
 
 def compensated_words(n_words: int, fertility: float, ratio: float,
@@ -308,6 +341,10 @@ def compensated_words(n_words: int, fertility: float, ratio: float,
     ``n_words / ratio``, clamped to ``cap / fertility``: asking for more words
     than the token cap can hold only guarantees a truncated passage, which Part
     13 drops. Never asks for fewer words than the human passage has.
+
+    This only ever *inflates* the ask, so a ratio above 1 has no effect. A bucket
+    that over-produces is therefore corrected by choosing a template it
+    under-produces under, not by a ratio — see hi, decisions.md 2026-09-18.
     """
     ratio = min(1.0, max(floor_ratio, ratio))
     return max(n_words, min(int(round(n_words / ratio)), int(cap / fertility)))

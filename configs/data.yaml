@@ -206,8 +206,11 @@ machine_corpus:
     # asks for human_words / ratio, clamped to what the cap can hold. te 0.62 is
     # measured under the "indic" template - the 0.31 figure came from the old plain
     # one, and compensating that on top of the new framing would double-count.
-    # hi and cm are estimates until their first 24 rows land (decisions.md 2026-09-18).
-    compliance_ratio: {en: 1.0, hi: 0.85, te: 0.62, cm: 0.85}
+    # Every value measured on that bucket's own probe before generating, never
+    # carried across by analogy (decisions.md 2026-09-18). The ratio only ever
+    # inflates the ask, so a bucket that over-produces is fixed by its template,
+    # not here: hi is on the plain template at 0.55 for exactly that reason.
+    compliance_ratio: {en: 1.0, hi: 0.55, te: 0.62, cm: 1.0}
     fertility_csv: results/tokenizer_fertility.csv
     fallback_tokenizer: Qwen/Qwen2.5-0.5B   # used when a generator's own tokenizer has no fertility rows
   assignment:
