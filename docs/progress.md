@@ -5,6 +5,17 @@ Newest entries at the top.
 
 ---
 
+## 2026-09-18 — Part 6 (in progress): qwen7b machine text
+
+- `qwen7b` machine corpus stands at **en 730/730, hi 731/731, te 12/712,
+  cm 0/701**. The run was stopped after 39 min: Telugu per-stream decode fell to
+  11.7 tok/s (below the 15 tok/s floor) and machine `te` is averaging 56 words
+  against 153 for the human passages it mirrors, so the rows would not survive
+  Part 13's per-bin length matching. `data/` is gitignored, so this log is the
+  record rather than a commit.
+
+---
+
 ## 2026-09-13 — Part 4: tokenizer fertility + three resumable CLIs
 
 - **Head B scorer LOCKED to `ai-forever/mGPT`** on measured fertility
