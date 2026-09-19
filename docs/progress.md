@@ -32,7 +32,7 @@ version that ran tested only the lower bound and waved a 1.72 through.
 - No change to `src/utils/resumable.py`: the gate is a phase in `generate.py`,
   not a new hook in the spine `score.py` and `attack.py` also depend on.
 
-**Verify:** `venv\Scripts\python.exe tests\data\test_generate.py` → 22 PASS
+**Verify:** `venv\Scripts\python.exe tests\data\test_generate.py` → 24 PASS
 offline. The regression test drives a 4.0x bucket through `run_with_gates` and
 asserts the bulk phase never runs: 24 rows, not 470.
 
