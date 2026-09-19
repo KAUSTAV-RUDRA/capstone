@@ -56,6 +56,13 @@ Backends
     models, since that would mix quantisations; the run refuses to append to a
     file written by a different one.
 
+Length gate
+    Each bucket is taken to its first ``machine_corpus.gate.probe_rows`` rows and
+    judged before the rest of that bucket is generated: the machine/human length
+    ratio must sit inside 0.75-1.25 and at most 20 % of rows may have hit the
+    token cap, or the run aborts. A prompt regime that does not transfer between
+    buckets is therefore worth 24 rows, not a corpus (:func:`run_with_gates`).
+
 Output is ``data/raw/machine/<generator>.jsonl``, one row per assigned human
 passage, carrying ``prompt_id`` back to it. Ids already present are skipped, so
 re-running the same command resumes.
@@ -76,13 +83,15 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
 from src.data.schema import LABEL_MACHINE, LANGUAGE_BUCKETS
 from src.utils.config import load_config
 from src.utils.io import read_jsonl
-from src.utils.resumable import DEFAULT_BATCH_SIZE, read_done_ids, run_concurrent, run_resumable
+from src.utils.resumable import (DEFAULT_BATCH_SIZE, RunReport, read_done_ids, run_concurrent,
+                                 run_resumable)
 
 log = logging.getLogger("generate")
 
@@ -679,6 +688,192 @@ def make_hf_processor(model, tokenizer, generator: str, role: str, model_id: str
     return process_batch
 
 
+# --- length gate ------------------------------------------------------------
+
+#: The gate: a bucket's first ``PROBE_ROWS`` rows must have a machine/human
+#: length ratio inside ``GATE_RATIO_RANGE``, with at most ``GATE_MAX_CAP_PCT``
+#: of them at the token cap, or the run aborts before the rest of that bucket
+#: is generated. Overridable under ``machine_corpus.gate`` in configs/data.yaml.
+#:
+#: From 2026-09-18 this check was a line in decisions.md and an ad-hoc watcher
+#: run by hand in a second terminal, which is precisely how cm reached 470 rows
+#: at 1.88 of human length: a check that is a habit rather than code runs only
+#: when someone remembers to run it, and its first version tested only the lower
+#: bound and waved a 1.72 through. Both bounds now live here (decisions.md
+#: 2026-09-19).
+PROBE_ROWS = 24
+GATE_RATIO_RANGE: tuple[float, float] = (0.75, 1.25)
+GATE_MAX_CAP_PCT = 20.0
+
+
+def _percentile(values: Sequence[float], q: float) -> float:
+    """Linear-interpolated percentile of an already-sorted sequence."""
+    if not values:
+        return 0.0
+    position = (len(values) - 1) * q
+    low = int(position)
+    high = min(low + 1, len(values) - 1)
+    return values[low] + (values[high] - values[low]) * (position - low)
+
+
+@dataclass
+class GateStats:
+    """Machine/human length statistics for one bucket's first rows.
+
+    ``ratio`` is the **median** of the per-row machine/human word ratios, and the
+    median is the gate's statistic deliberately. cm's failure was concentrated in
+    the short passages — 21 human words answered with 84 machine words — so a
+    length-weighted ratio of totals dilutes exactly the rows that are wrong,
+    while a plain mean is dragged around by one runaway row. Measured on the 470
+    discarded cm rows: median 1.98 against a mean of 1.88.
+    """
+
+    bucket: str
+    n: int
+    ratio: float = 0.0
+    mean: float = 0.0
+    p90: float = 0.0
+    cap_pct: float = 0.0
+    over_pct: float = 0.0
+
+    def describe(self) -> str:
+        return (f"{self.bucket}: {self.n} rows, machine/human length median {self.ratio:.2f} "
+                f"(mean {self.mean:.2f}, p90 {self.p90:.2f}), {self.cap_pct:.0f} % at the token cap")
+
+
+def gate_stats(bucket: str, rows: Sequence[dict[str, Any]],
+               ratio_max: float = GATE_RATIO_RANGE[1]) -> GateStats:
+    """Length statistics for ``rows``, which must already be one bucket's rows."""
+    ratios: list[float] = []
+    for row in rows:
+        human = float(row.get("human_length_words") or 0)
+        if human > 0:
+            ratios.append(float(row.get("length_words") or 0) / human)
+    if not ratios:
+        return GateStats(bucket, 0)
+    ratios.sort()
+    return GateStats(
+        bucket=bucket,
+        n=len(ratios),
+        ratio=_percentile(ratios, 0.5),
+        mean=sum(ratios) / len(ratios),
+        p90=_percentile(ratios, 0.9),
+        cap_pct=100.0 * sum(1 for row in rows if row.get("truncated")) / len(rows),
+        over_pct=100.0 * sum(1 for r in ratios if r > ratio_max) / len(ratios),
+    )
+
+
+def gate_reasons(stats: GateStats, ratio_range: tuple[float, float] = GATE_RATIO_RANGE,
+                 max_cap_pct: float = GATE_MAX_CAP_PCT) -> list[str]:
+    """Why this bucket fails the gate; empty means it passes.
+
+    Both bounds are tested. Failing only below ``ratio_range[0]`` is what let the
+    cm run reach 470 rows: the watcher saw 1.72 and passed it.
+    """
+    low, high = ratio_range
+    reasons: list[str] = []
+    if stats.n == 0:
+        return reasons
+    if not low <= stats.ratio <= high:
+        direction = "under" if stats.ratio < low else "over"
+        reasons.append(f"machine/human length ratio {stats.ratio:.2f} is outside {low}-{high} "
+                       f"({direction}-production; mean {stats.mean:.2f}, p90 {stats.p90:.2f}, "
+                       f"{stats.over_pct:.0f} % of rows above {high})")
+    if stats.cap_pct > max_cap_pct:
+        reasons.append(f"{stats.cap_pct:.0f} % of rows hit the token cap, limit {max_cap_pct:.0f} % "
+                       f"— they are truncated, not written short")
+    return reasons
+
+
+def gate_failure_message(stats: GateStats, reasons: Sequence[str], out_path: Path,
+                         remaining: int) -> str:
+    """The abort message: what failed, what it cost, and what to do about it."""
+    bullets = "\n".join(f"  - {reason}" for reason in reasons)
+    return (
+        f"\nGATE FAILED — bucket '{stats.bucket}' after {stats.n} rows\n"
+        f"{bullets}\n\n"
+        f"Aborted before the remaining {remaining} '{stats.bucket}' passages were generated.\n"
+        f"Those {stats.n} rows are still in {out_path} and are NOT usable — a resume reads them\n"
+        f"back and fails this gate again until they are removed, which is deliberate.\n\n"
+        f"Fix the bucket's prompt template or compliance ratio first (both are per-bucket and\n"
+        f"measured on a 12-passage probe, never carried across by analogy — docs/decisions.md\n"
+        f"2026-09-18), then drop the bucket's rows and re-run the same command:\n"
+        f"  python -c \"import json,pathlib; p=pathlib.Path(r'{out_path}'); "
+        f"p.write_text(''.join(l for l in p.read_text(encoding='utf-8').splitlines(keepends=True) "
+        f"if l.strip() and json.loads(l)['language']!='{stats.bucket}'), encoding='utf-8')\"\n"
+    )
+
+
+def bucket_rows(out_path: Path, bucket: str, limit: int) -> list[dict[str, Any]]:
+    """The first ``limit`` rows of ``bucket`` in an output file, in written order."""
+    rows: list[dict[str, Any]] = []
+    if not Path(out_path).exists():
+        return rows
+    with open(out_path, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if row.get("language") == bucket:
+                rows.append(row)
+                if len(rows) >= limit:
+                    break
+    return rows
+
+
+def run_with_gates(buckets: Sequence[str], prompts: Sequence[dict[str, Any]], *,
+                   done_ids: set[str], out_path: Path,
+                   run_phase: Callable[..., RunReport],
+                   probe_rows: int = PROBE_ROWS,
+                   ratio_range: tuple[float, float] = GATE_RATIO_RANGE,
+                   max_cap_pct: float = GATE_MAX_CAP_PCT) -> RunReport:
+    """Probe each bucket, gate it, then generate the rest. Aborts if a gate fails.
+
+    Every bucket is taken to ``probe_rows`` rows and judged before the next one
+    is touched, so a prompt regime that does not transfer costs 24 rows rather
+    than a bucket. Rows already on disk from an earlier sitting count towards the
+    probe, so a resume judges what is there instead of generating a fresh 24 —
+    and a bucket whose bad rows were never cleaned up keeps failing, by design.
+
+    The probe rows are ordinary corpus rows written to the same file, and the
+    bulk phase receives the full prompt list with ``done_ids`` already updated,
+    so a passing probe is never regenerated.
+
+    Raises:
+        SystemExit: a bucket's first rows failed the gate.
+    """
+    for bucket in buckets:
+        in_bucket = [p for p in prompts if p["bucket"] == bucket]
+        if not in_bucket:
+            continue
+        pending = [p for p in in_bucket if p["id"] not in done_ids]
+        on_disk = len(in_bucket) - len(pending)
+        shortfall = min(max(0, probe_rows - on_disk), len(pending))
+        if shortfall:
+            log.info("bucket %s: generating %d rows for the gate probe (%d already on disk)",
+                     bucket, shortfall, on_disk)
+            phase = run_phase(pending[:shortfall], f"{bucket} gate-probe")
+            if phase.stopped_by_time:
+                log.warning("bucket %s: gate probe stopped at --max-minutes — not starting the bulk run",
+                            bucket)
+                return phase
+        stats = gate_stats(bucket, bucket_rows(out_path, bucket, probe_rows), ratio_range[1])
+        if stats.n == 0:
+            log.warning("bucket %s: no rows to judge (every probe request failed) — "
+                        "not starting the bulk run", bucket)
+            return RunReport(total=len(prompts), already_done=len(prompts) - len(pending))
+        reasons = gate_reasons(stats, ratio_range, max_cap_pct)
+        if reasons:
+            remaining = len([p for p in in_bucket if p["id"] not in done_ids])
+            raise SystemExit(gate_failure_message(stats, reasons, out_path, remaining))
+        log.info("gate passed — %s", stats.describe())
+    return run_phase(prompts, "passages")
+
+
 # --- CLI --------------------------------------------------------------------
 
 def main(argv: list[str] | None = None) -> None:
@@ -783,6 +978,14 @@ def main(argv: list[str] | None = None) -> None:
         print(f"\ncomplete — {len(prompts)} of {len(prompts)} (nothing to generate)\n{out_path}")
         return
 
+    # One wall deadline across the gate probes and the bulk run, so --max-minutes
+    # still means what it says now that a run is several phases.
+    deadline = time.monotonic() + args.max_minutes * 60 if args.max_minutes and args.max_minutes > 0 else None
+
+    def minutes_left() -> float | None:
+        """Minutes of budget left, or None when there is no limit."""
+        return None if deadline is None else (deadline - time.monotonic()) / 60
+
     if backend == "ollama":
         ollama_cfg = mc.get("ollama") or {}
         client = OllamaClient(args.host or ollama_cfg.get("host", "http://127.0.0.1:11434"),
@@ -803,9 +1006,14 @@ def main(argv: list[str] | None = None) -> None:
                                           keep_alive=keep_alive, seed=args.seed)
         meter = process_item.meter  # type: ignore[attr-defined]
         precision = info["quantization"]
-        report = run_concurrent(prompts, id_of=lambda p: p["id"], process_item=process_item,
-                                out_path=out_path, done_ids=done_ids, workers=parallel,
-                                max_minutes=args.max_minutes, label="passages")
+
+        def run_phase(items: Sequence[dict[str, Any]], label: str = "passages") -> RunReport:
+            left = minutes_left()
+            if left is not None and left <= 0:
+                return RunReport(total=len(items), stopped_by_time=True)
+            return run_concurrent(items, id_of=lambda p: p["id"], process_item=process_item,
+                                  out_path=out_path, done_ids=done_ids, workers=parallel,
+                                  max_minutes=left or 0, label=label)
     else:
         from src.utils.modelload import load_causal_lm
 
@@ -814,9 +1022,24 @@ def main(argv: list[str] | None = None) -> None:
                                           temperature=temperature, top_p=top_p)
         meter = process_batch.meter  # type: ignore[attr-defined]
         precision = f"{info['dtype']} on {info['device']}"
-        report = run_resumable(prompts, id_of=lambda p: p["id"], process_batch=process_batch,
-                               out_path=out_path, done_ids=done_ids, batch_size=args.batch_size,
-                               max_minutes=args.max_minutes, label="passages")
+
+        def run_phase(items: Sequence[dict[str, Any]], label: str = "passages") -> RunReport:
+            left = minutes_left()
+            if left is not None and left <= 0:
+                return RunReport(total=len(items), stopped_by_time=True)
+            return run_resumable(items, id_of=lambda p: p["id"], process_batch=process_batch,
+                                 out_path=out_path, done_ids=done_ids, batch_size=args.batch_size,
+                                 max_minutes=left or 0, label=label)
+
+    # Each bucket is judged on its first rows before the rest of it is generated:
+    # a prompt regime that does not transfer costs 24 rows, not a bucket.
+    gate_cfg = mc.get("gate") or {}
+    report = run_with_gates(
+        buckets, prompts, done_ids=done_ids, out_path=out_path, run_phase=run_phase,
+        probe_rows=int(gate_cfg.get("probe_rows", PROBE_ROWS)),
+        ratio_range=(float(gate_cfg.get("ratio_min", GATE_RATIO_RANGE[0])),
+                     float(gate_cfg.get("ratio_max", GATE_RATIO_RANGE[1]))),
+        max_cap_pct=float(gate_cfg.get("max_cap_pct", GATE_MAX_CAP_PCT)))
 
     resume = f"python -m src.data.generate --generator {args.generator} --buckets {args.buckets}"
     if args.fraction != 1.0:

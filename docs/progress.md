@@ -5,6 +5,39 @@ Newest entries at the top.
 
 ---
 
+## 2026-09-19 — the length gate moved into the code
+
+The gate that decides whether a bucket's prompt regime is working existed only
+as a rule in `decisions.md` and an ad-hoc watcher run by hand in a second
+terminal. That is the blind spot that let `cm` reach 470 bad rows: a check that
+is a habit rather than code runs only when someone remembers to run it, and the
+version that ran tested only the lower bound and waved a 1.72 through.
+
+- **It is now `run_with_gates` in `src/data/generate.py`.** Each bucket is taken
+  to its first 24 rows and judged *before* the rest of that bucket is generated:
+  median machine/human word ratio inside **0.75–1.25**, at most **20 %** of rows
+  at the token cap. A failure aborts the run and prints what failed, what it
+  cost, and the command to drop the bucket's rows. Thresholds live in
+  `configs/data.yaml` under `machine_corpus.gate`.
+- **The statistic is the median, not the mean or a ratio of totals.** cm's
+  failure was concentrated in the short passages (21 human words → 84 machine
+  words), which a length-weighted ratio of totals dilutes and one runaway row
+  drags a mean around: on the 470 discarded rows the median read 1.98 to the
+  mean's 1.88.
+- **Probe rows are corpus rows,** written to the same file and skipped by the
+  bulk phase, so a passing gate costs nothing. Rows already on disk count
+  towards the 24, so a resume judges what is there rather than generating a
+  fresh 24 — and a bucket whose bad rows were never cleaned up keeps failing,
+  which is deliberate. There is no `--skip-gate` flag, for the same reason.
+- No change to `src/utils/resumable.py`: the gate is a phase in `generate.py`,
+  not a new hook in the spine `score.py` and `attack.py` also depend on.
+
+**Verify:** `venv\Scripts\python.exe tests\data\test_generate.py` → 22 PASS
+offline. The regression test drives a 4.0x bucket through `run_with_gates` and
+asserts the bulk phase never runs: 24 rows, not 470.
+
+---
+
 ## 2026-09-18 — Part 6 (in progress): qwen7b machine text
 
 Three halted runs in one sitting, all for length-matching defects. The failures
@@ -35,8 +68,29 @@ are the useful part and some of this belongs in the paper's corpus section.
   `max(8, n/12)` (their bins are all >= 100, so their prompts are unchanged and
   the 56 good `te` rows stay valid); gate now fails outside 0.75–1.25.
 - **Measured, not assumed:** a cm probe showed the plain template *under*-produces
-  at 0.76 — `cm` needs the sentence clause, just not that floor. `hi` gets the
-  same probe before its 500 rows are generated rather than after 24.
+  at 0.76 — `cm` needs the sentence clause, just not that floor.
+- **`hi` was probed before its 500 rows, not after 24, and it paid for itself.**
+  12 passages x 3 variants: plain template **0.57**, insistent framing with the
+  sentence clause **1.40**, insistent without it **1.21**. The regime `hi` was
+  about to run — insistent framing plus 0.85 compensation — would have written
+  **~1.59** of human length: a 1.35 over-producer with its ask inflated a further
+  1.18x. That is cm's failure repeated, caught before the rows existed.
+- **`hi` takes the plain template at ratio 0.55, not the best raw ratio.** On raw
+  numbers the no-sentence variant (1.21) is closest to 1.0, but
+  `compensated_words` only ever *inflates* the ask — it clamps `ratio <= 1.0` and
+  never asks for fewer words than the human passage. A 1.17 in the config would
+  be silently clamped to 1.0 and `hi` would generate at 1.21 while the config
+  claimed otherwise. Relaxing that clamp was **rejected**: it widens a core
+  function's contract to serve one bucket, and the alternative needs no code
+  change. Since compensation can only correct *under*-production, the right
+  template is the one `hi` under-produces under — the plain one, ask inflated
+  x1.8, exactly the mechanism `te` already uses. Two independent measurements
+  agree on the value: the probe (0.55) and the real 731-row `hi` corpus
+  generated under that template (0.57).
+- **The rule that generalises:** pick the template whose bias the existing
+  mechanism can correct. Four buckets now run three templates and three ratios,
+  and the paper's corpus section must say so — prompt regime is a per-bucket
+  empirical choice, not one design applied uniformly.
 - State at the end of the sitting: **en 730/730 (0.90), te 56/400 (0.94),
   cm 0/701, hi 0/500**. `data/` is gitignored, so this log is the record.
 

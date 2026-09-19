@@ -255,6 +255,115 @@ def test_refuses_to_append_to_a_file_from_another_backend() -> None:
             raise AssertionError("mixing backends in one file must be refused")
 
 
+def _gate_rows(bucket: str, pairs: list[tuple[int, int]], truncated: int = 0) -> list[dict]:
+    """Output rows from (human_words, machine_words) pairs; the first `truncated` hit the cap."""
+    return [{"id": f"qwen7b__{bucket}-{n:03d}", "language": bucket, "length_words": machine,
+             "human_length_words": human, "truncated": n < truncated}
+            for n, (human, machine) in enumerate(pairs)]
+
+
+def _fake_phase(out: Path, done: set[str], seen: list[int], human: int, machine: int):
+    """A run_phase that writes one row per item at a fixed machine/human length ratio."""
+    def run_phase(items, label="passages"):
+        seen.append(len(items))
+        with open(out, "a", encoding="utf-8") as fh:
+            for item in items:
+                fh.write(json.dumps({"id": item["id"], "language": item["bucket"],
+                                     "length_words": machine, "human_length_words": human,
+                                     "truncated": False}) + "\n")
+        done.update(item["id"] for item in items)
+        return resumable.RunReport(total=len(items), processed=len(items))
+    return run_phase
+
+
+def test_gate_uses_the_median_and_catches_cm_over_production() -> None:
+    # The 470 discarded cm rows: short human passages answered at ~4x while the
+    # long ones behaved (decisions.md 2026-09-18). The median is the statistic
+    # because a length-weighted ratio of totals dilutes exactly those short rows.
+    stats = generate.gate_stats("cm", _gate_rows("cm", [(21, 84)] * 12 + [(150, 190)] * 12))
+    assert stats.n == 24 and stats.ratio > 1.25
+    reasons = generate.gate_reasons(stats)
+    assert len(reasons) == 1 and "over-production" in reasons[0]
+    te = generate.gate_stats("te", _gate_rows("te", [(150, 141)] * 24))   # the real te, 0.94
+    assert generate.gate_reasons(te) == []
+
+
+def test_gate_tests_both_bounds_and_the_cap_independently() -> None:
+    # Under-production: hi on the plain template at 0.55, before compensation.
+    under = generate.gate_stats("hi", _gate_rows("hi", [(180, 99)] * 24))
+    assert len(generate.gate_reasons(under)) == 1 and "under-production" in generate.gate_reasons(under)[0]
+    # A 1.72 passed the watcher, which only tested the lower bound. It must not pass here.
+    over = generate.gate_stats("cm", _gate_rows("cm", [(50, 86)] * 24))
+    assert generate.gate_reasons(over), "the upper bound is what the watcher was missing"
+    # Ratio 1.0 but half the rows truncated: the cap is a separate failure.
+    capped = generate.gate_stats("te", _gate_rows("te", [(150, 150)] * 24, truncated=12))
+    reasons = generate.gate_reasons(capped)
+    assert len(reasons) == 1 and "token cap" in reasons[0]
+
+
+def test_a_failing_bucket_aborts_before_the_bulk_run() -> None:
+    # The cm regression: a bad prompt regime must cost 24 rows, not 470.
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "qwen7b.jsonl"
+        prompts = [{"id": f"qwen7b__cm-{i:03d}", "bucket": "cm"} for i in range(470)]
+        done: set[str] = set()
+        seen: list[int] = []
+        try:
+            generate.run_with_gates(["cm"], prompts, done_ids=done, out_path=out,
+                                    run_phase=_fake_phase(out, done, seen, human=21, machine=84))
+        except SystemExit as exc:
+            assert "cm" in str(exc) and "4.00" in str(exc), exc
+        else:
+            raise AssertionError("a 4.0x bucket must abort the run")
+        assert seen == [24], seen          # the probe ran; the other 446 never did
+
+
+def test_a_passing_bucket_probes_once_then_runs_the_rest() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "qwen7b.jsonl"
+        prompts = [{"id": f"qwen7b__te-{i:03d}", "bucket": "te"} for i in range(100)]
+        done: set[str] = set()
+        seen: list[int] = []
+        report = generate.run_with_gates(["te"], prompts, done_ids=done, out_path=out,
+                                         run_phase=_fake_phase(out, done, seen, human=150, machine=141))
+        # probe, then the full list — the real runners skip the probe rows via done_ids
+        assert seen == [24, 100] and report.total == 100
+
+
+def test_rows_already_on_disk_count_towards_the_probe() -> None:
+    # te resumed with 56 rows from an earlier sitting: judge those, generate no probe.
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "qwen7b.jsonl"
+        prompts = [{"id": f"qwen7b__te-{i:03d}", "bucket": "te"} for i in range(100)]
+        done = {p["id"] for p in prompts[:56]}
+        with open(out, "w", encoding="utf-8") as fh:
+            for row in _gate_rows("te", [(150, 141)] * 56):     # ids match prompts[:56]
+                fh.write(json.dumps(row) + "\n")
+        seen: list[int] = []
+        generate.run_with_gates(["te"], prompts, done_ids=done, out_path=out,
+                                run_phase=_fake_phase(out, done, seen, human=150, machine=141))
+        assert seen == [100], seen         # the bulk phase only
+
+
+def test_a_bucket_whose_rows_are_bad_keeps_failing_on_resume() -> None:
+    # Deliberate: the probe rows stay on disk, so the next run reads them back and
+    # fails the same gate until they are removed. No --skip-gate flag exists.
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "qwen7b.jsonl"
+        prompts = [{"id": f"qwen7b__cm-{i:03d}", "bucket": "cm"} for i in range(470)]
+        done: set[str] = set()
+        for expected in ([24], []):        # first run generates the probe, second generates nothing
+            seen: list[int] = []
+            try:
+                generate.run_with_gates(["cm"], prompts, done_ids=done, out_path=out,
+                                        run_phase=_fake_phase(out, done, seen, human=21, machine=84))
+            except SystemExit:
+                pass
+            else:
+                raise AssertionError("must abort every time")
+            assert seen == expected, (seen, expected)
+
+
 if __name__ == "__main__":
     import sys
 

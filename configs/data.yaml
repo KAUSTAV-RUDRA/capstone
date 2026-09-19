@@ -213,6 +213,17 @@ machine_corpus:
     compliance_ratio: {en: 1.0, hi: 0.55, te: 0.62, cm: 1.0}
     fertility_csv: results/tokenizer_fertility.csv
     fallback_tokenizer: Qwen/Qwen2.5-0.5B   # used when a generator's own tokenizer has no fertility rows
+  # Abort gate (decisions.md 2026-09-19). Each bucket is taken to `probe_rows`
+  # rows and judged before the rest of it is generated: the median machine/human
+  # word ratio must be inside [ratio_min, ratio_max] and at most `max_cap_pct` of
+  # rows may have hit the token cap. BOTH ratio bounds are tested - failing only
+  # below 0.75 is what let a cm run reach 470 rows at 1.88 of human length. Rows
+  # already on disk count towards the probe, so a resume judges what is there.
+  gate:
+    probe_rows: 24
+    ratio_min: 0.75
+    ratio_max: 1.25
+    max_cap_pct: 20
   assignment:
     heldout_share: 0.30             # per held-out generator; the two slices are disjoint
   # Per-bucket cap on passages PER GENERATOR. Indic decoding is the cost driver:

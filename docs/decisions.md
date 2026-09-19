@@ -707,6 +707,38 @@ other three at the prompt level.
 
 ---
 
+## 2026-09-19 — the gate is code, and its statistic is the median
+
+The 0.75–1.25 rule decided on 2026-09-18 lived in this file and in a watcher run
+by hand in a second terminal. It is now `run_with_gates` in
+`src/data/generate.py`, with thresholds in `configs/data.yaml` under
+`machine_corpus.gate`.
+
+**Why it moved.** A check that is a habit rather than code runs only when
+someone remembers to run it. That is the whole of the cm failure: the rule
+existed, and 470 rows were generated anyway.
+
+**Where it sits.** A preflight phase inside `generate.py`, not a new callback in
+`src/utils/resumable.py`. Adding a row hook to the spine would widen the
+contract of a file `score.py` and `attack.py` also depend on, to serve one
+caller — the same reasoning that rejected relaxing `compensated_words`' clamp
+for `hi` on 2026-09-18. The preflight also aborts *before* any bulk work exists,
+which a hook cannot: it can only stop a run already in progress.
+
+**The statistic is the median of per-row ratios.** cm's over-production was
+concentrated in the short passages (21 human words → 84 machine), so a
+length-weighted ratio of totals dilutes exactly the rows that are wrong, and a
+mean is dragged by one runaway row. On the 470 discarded cm rows the median read
+1.98 against a mean of 1.88. `cap %` is the share of rows with
+`done_reason == "length"`.
+
+**Deliberately awkward, in two places.** Failed probe rows stay on disk and make
+every resume fail the same gate until they are removed, and there is no
+`--skip-gate` flag. Both are there so the gate cannot be walked past the way the
+watcher could.
+
+---
+
 ## Decisions still open (fill as resolved)
 
 - [ ] Phase 0.1 — what "patent" means (disclosure / IPR-cell / IPO provisional).
