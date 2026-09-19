@@ -739,6 +739,71 @@ watcher could.
 
 ---
 
+## 2026-09-20 — the 24-row gate under-reads in both directions
+
+The gate locked on 2026-09-19 passes a bucket on the median ratio of its first
+24 rows. Two buckets have now been carried far past that probe, and in both the
+median moved — in opposite directions.
+
+| bucket | gate (24 rows) | settled | n | rows outside 0.75–1.25 |
+|---|---|---|---|---|
+| `te` | 0.99 | **0.94** | 382 | 24.6 % |
+| `hi` | 1.00 | **1.07** | 256 | 31.6 % |
+
+**The median is the right tripwire and the wrong estimator.** It caught `cm` at
+1.98 on the 470 discarded rows, which is the job it exists for: a structurally
+broken regime moves the median far outside the band, fast, and 24 rows are
+enough to see it. What 24 rows cannot do is predict where a *working* bucket
+settles — `te` drifted −0.05 and `hi` +0.07 off the same reading. **A gate
+figure must therefore never be quoted as a bucket's ratio** in the corpus card
+or the paper; report the settled median at the bucket's final n.
+
+**It also says nothing about spread, and the spread is large.** Both buckets
+pass on a median comfortably inside 0.75–1.25 while a quarter to a third of
+their rows sit outside it. A bucket could in principle hold a 1.00 median with
+every row at 0.5 or 1.5 and pass untouched. That was a one-bucket suspicion on
+2026-09-19; two buckets now support it.
+
+**Decision: add a dispersion check to the gate — but not this sitting.**
+Deferred until `te` and `hi` are complete, for two reasons. The threshold should
+be set from settled p90 values (`te` 1.25, `hi` 1.40) rather than guessed. And
+changing the gate mid-corpus would leave one generator's rows judged under two
+gate regimes — the same objection that makes the corpus's two prompt templates
+something the paper must state outright. No change to `configs/data.yaml` yet.
+
+---
+
+## 2026-09-20 — Run 1's 11.7 tok/s was configuration, not Telugu
+
+Run 1 was halted on 2026-09-18 when Telugu per-stream decode fell to 11.7 tok/s
+against a 15 tok/s floor. The open question since was whether `te` is simply too
+slow to generate on this box.
+
+It is not. Across 326 `te` rows in one 111-minute sitting:
+
+| | per-stream |
+|---|---|
+| Run 1 (halted) | 11.7 tok/s |
+| floor | 15 tok/s |
+| `te`, warm-up peak | 31.0 tok/s |
+| **`te`, settled plateau** | **20.4–20.5 tok/s** |
+| `hi`, for comparison | 20.8 tok/s |
+
+**`te` sustains the same per-stream rate as `hi`.** The plateau held at 20.5 for
+the last 30 minutes at concurrency x3.3–4.2, so the fall from the warm-up peak
+is decode slowing under sustained load (most likely thermal), not workers going
+idle. It was also checked against row length rather than assumed: the final rows
+averaged 1,874 gen-tokens against the bucket's 1,893, on ordinary-length inputs,
+so the queue had not reached the long passages.
+
+**Consequence:** `te` needs no throughput special-casing, no floor change and no
+`--max-minutes` change. `te` is expensive in *tokens* — 1,893 gen-tokens/row
+against `hi`'s 869 and `cm`'s 161 — which is a budget fact, not a speed fault.
+Run 1's halt belongs to that run's configuration and the corpus section should
+describe it that way.
+
+---
+
 ## Decisions still open (fill as resolved)
 
 - [ ] Phase 0.1 — what "patent" means (disclosure / IPR-cell / IPO provisional).

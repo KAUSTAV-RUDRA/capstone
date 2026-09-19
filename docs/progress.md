@@ -5,6 +5,63 @@ Newest entries at the top.
 
 ---
 
+## 2026-09-20 — qwen7b: te reordered first, 382/400, and the 11.7 tok/s question closed
+
+Ran `te` first so the expensive bucket took the fresh budget. Stopped by
+`--max-minutes` at 00:44:54, exit 0. **One warning in the whole run and it was
+the budget stop itself. Zero failed requests** — against four lost to the Ollama
+restart last sitting.
+
+| bucket | rows | median | mean | p90 | at cap | gen-tokens/row |
+|---|---|---|---|---|---|---|
+| en | 730/730 | 0.87 | 0.87 | 1.16 | 0.0 % | 235 |
+| hi | 256/500 | 1.07 | 1.08 | 1.40 | 2.3 % | 869 |
+| te | **382/400** | 0.94 | 0.96 | 1.25 | 0.8 % | 1,893 |
+| cm | 24/701 | 1.02 | 1.09 | 1.47 | 0.0 % | 161 |
+
+1,392 rows total, **+326 this sitting, all `te`**. 618,807 tokens in 111.3 min =
+92.7 tok/s run average.
+
+- **`te` decodes as fast as `hi` — the 11.7 tok/s that halted Run 1 was not the
+  bucket.** Warm-up climbed 23.1 → 31.0 tok/s per stream, then settled at
+  **20.4–20.5** for the last half hour, against a 15 floor and `hi`'s 20.8. The
+  fall off the peak is decode slowing under sustained load, not lost concurrency
+  (x3.3–4.2 throughout) and not the long passages arriving — the final rows
+  averaged 1,874 gen-tokens against the bucket's 1,893, on ordinary-length
+  inputs. See `decisions.md`.
+- **All three gates re-passed off disk in 0.1 s** — `te` 0.99, `cm` 1.02, `hi`
+  1.00, judged from rows already written, no probe generated, zero cost. The
+  resume path working exactly as designed.
+- **The 24-row gate under-reads in both directions.** `te` 0.99 → 0.94 at 382
+  rows, `hi` 1.00 → 1.07 at 256, with 24.6 % and 31.6 % of rows outside
+  0.75–1.25. Last sitting called this on `hi` alone; `te` confirms it and drifts
+  the *other* way. The median is a tripwire for a broken regime, never an
+  estimate of a bucket's final ratio — `decisions.md` carries the
+  dispersion-check decision.
+- **The `te` cap worry did not materialise.** 17 % of `te` rows had
+  `num_predict` clamped to the 3600 cap and **none of them truncated**; the only
+  2 truncations in 382 rows were *short* passages overrunning their own smaller
+  budget (129w → 211w, 184w → 287w). `te` truncation fell as n grew:
+  1.7 → 0.7 → 0.6 → 0.8 %.
+- **Throughput climbed, then plateaued.** Run average 69.4 → 104.3 tok/s over
+  the first 80 minutes as the worker pool filled (concurrency x3.0 → x4.2), then
+  eased to 92.7 by the end. Finish estimates drawn from warm-up windows were
+  ~40 % optimistic and had to be revised three times; the runner's own ETA
+  stayed wrong in the other direction for the known reason — it spreads `te`'s
+  1,893 gen-tokens/row uniformly across `cm`'s 161-token rows.
+
+**Remaining for qwen7b: `te` 18, `cm` 677, `hi` 244** — 939 of the 1,601 in
+scope. At this sitting's rates that is ~85–90 min, so one more sitting finishes
+the generator.
+
+**Verify / resume:** `python -m src.data.generate --generator qwen7b --buckets
+te,cm,hi --max-minutes 110` — re-judges each bucket's first 24 rows off disk in
+well under a second, then continues where it stopped.
+
+**Next:** finish `te`'s 18 rows, then `cm` and `hi` on the same sitting.
+
+---
+
 ## 2026-09-19 — qwen7b sitting: the gate's first real run, hi to 51 %
 
 First generation run with the gate in the code. **All three gates fired within
