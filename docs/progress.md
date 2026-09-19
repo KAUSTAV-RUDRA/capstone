@@ -5,6 +5,106 @@ Newest entries at the top.
 
 ---
 
+## 2026-09-20 — qwen7b complete at 2,331 rows, and `cm` settled out of band
+
+All four buckets reached target in one sitting: `te` 382 → 400, `cm` 67 → 701,
+`hi` 256 → 500. 1,484,227 generated tokens on disk, zero duplicate `id`, zero
+duplicate `prompt_id`, zero malformed lines.
+
+| bucket | rows | median | mean | p90 | at cap | gen-tokens/row |
+|---|---|---|---|---|---|---|
+| en | 730/730 | 0.87 | 0.87 | 1.16 | 0.0 % | 235 |
+| hi | 500/500 | 1.10 | 1.10 | 1.41 | 3.0 % | 975 |
+| te | 400/400 | 0.94 | 0.96 | 1.25 | 0.8 % | 1,899 |
+| cm | **701/701** | **1.39** | **1.52** | **2.37** | 0.0 % | 94 |
+
+### `cm` is out of band and the gate never saw it
+
+**`cm`'s settled median is 1.39 against a gate reading of 1.02** — outside the
+0.75–1.25 the gate itself enforces, with **67 % of rows outside the band**. Run
+the gate against the finished bucket and it fails. This is not a small drift; it
+is the 2026-09-18 over-production fault surviving its fix at reduced amplitude.
+
+**The cause is that the probe was not a sample of the bucket.** The gate judges
+the *first* 24 rows, and for `cm` those are nothing like the other 677:
+
+| | human words, median | share in the 0–40 bin |
+|---|---|---|
+| first 24 (the gate probe) | **82** | 12.5 % (3 of 24) |
+| all 701 | **26** | **59 % (413 of 701)** |
+
+And `cm`'s failure lives entirely in the short bin:
+
+| human-length bin | n | median | p90 | human → machine (median words) |
+|---|---|---|---|---|
+| **0–40** | **413** | **1.75** | 2.59 | **20 → 36** |
+| 40–70 | 74 | 0.94 | 1.26 | 54 → 51 |
+| 70–100 | 78 | 1.21 | 1.55 | 80 → 107 |
+| 100–150 | 79 | 1.07 | 1.31 | 120 → 127 |
+| 150–250 | 49 | 1.00 | 1.49 | 171 → 172 |
+| 250+ | 8 | 1.36 | 1.48 | 266 → 368 |
+
+Every bin from 40 words up is inside the band. The bucket fails because the bin
+that fails is the bin that *is* the bucket. The `max(2, n/15)` sentence floor
+did reduce the original defect — 4.0x on a 21-word passage became 1.75 at 20 —
+but did not remove it: the model will not write 20 words when asked.
+
+**The finding for the corpus section is sharper than "24 rows is too few".** The
+probe is the *head* of a list sorted by human id, not a random or stratified
+draw, so it inherits whatever length distribution that ordering happens to
+front-load. `te` (0.99 → 0.94) and `hi` (1.00 → 1.10) drifted modestly because
+their probes were roughly representative; `cm`'s probe drew a median passage 3x
+longer than its bucket and was therefore blind by construction. A probe
+stratified across the length bins would have read ~1.75 on the short bin and
+failed `cm` at 24 rows, which is exactly what the gate exists to do.
+
+`en` is the control: gate 0.87 → settled 0.87 at 730 rows, drift 0.00.
+
+| bucket | gate (24) | settled | n | drift | outside 0.75–1.25 |
+|---|---|---|---|---|---|
+| en | 0.87 | 0.87 | 730 | +0.00 | 34.7 % |
+| te | 0.99 | 0.94 | 400 | −0.04 | 24.8 % |
+| hi | 1.00 | 1.10 | 500 | +0.10 | 34.0 % |
+| cm | 1.02 | **1.39** | 701 | **+0.38** | **67.0 %** |
+
+**`cm`'s 701 rows are not usable as they stand** and the decision on them —
+regenerate the 0–40 bin under a corrected prompt, drop the bin, or accept and
+document — is open. Nothing has been discarded.
+
+### The sitting itself
+
+- **`te` closed at 400/400**, median 0.94, and needed only its last 18 rows.
+- **Two processes were briefly running at once** — one started by me before the
+  user's message arrived, one by the user — and the corpus was checked for
+  damage: 0 duplicate ids, 0 duplicate `prompt_id`, 0 malformed lines. Only one
+  had written. No rewrite was needed, and a rewrite would itself have been
+  unsafe with a live appender holding the file open.
+- **The first user run was killed at 00:56 by Claude**, ~47 minutes of its
+  55-minute budget unused. A second `generate` process (PID 11292) looked inert
+  — 0 CPU, 1 thread, 4.3 MB, no socket to Ollama — and was killed as a duplicate
+  hazard; it was the **parent** of the working process, which died with it. The
+  giveaway was in the same `Win32_Process` query that was used to confirm the
+  command line: `ParentProcessId` was not checked. No rows were lost (rows flush
+  as they land); the cost was the unused budget. The run was restarted by the
+  user and completed.
+- **This sitting's rows were generated under the anaconda interpreter**,
+  `C:\Users\harik\anaconda3\python.exe`, not the project venv: the user's
+  PowerShell had the venv activated but `python` resolved to anaconda first.
+  Immaterial to the rows themselves — Ollama does the work server-side and the
+  client only posts HTTP — but recorded here so the corpus card is not
+  reconstructed wrongly later. **Invoke the venv explicitly in future:
+  `.\venv\Scripts\python.exe`, not `python`.**
+
+**Verify:** `.\venv\Scripts\python.exe -m src.data.generate --generator qwen7b
+--buckets en,hi,te,cm` → prints `complete — 2331 of 2331 (nothing to generate)`
+and exits without contacting Ollama.
+
+**Next:** decide `cm`. Then the remaining four generators (gemma, mistral as
+seen; llama, phi held out) — and the `cm` prompt regime must be settled first,
+because every generator will otherwise reproduce the same short-passage defect.
+
+---
+
 ## 2026-09-20 — qwen7b: te reordered first, 382/400, and the 11.7 tok/s question closed
 
 Ran `te` first so the expensive bucket took the fresh budget. Stopped by
