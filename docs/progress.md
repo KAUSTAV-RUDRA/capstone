@@ -5,6 +5,54 @@ Newest entries at the top.
 
 ---
 
+## 2026-09-19 — qwen7b sitting: the gate's first real run, hi to 51 %
+
+First generation run with the gate in the code. **All three gates fired within
+six minutes of start and all three passed** — `hi` 0.99 (20 rows), `cm` 1.02
+(24 rows), `te` 0.99 (24 rows, judged from the rows already on disk without
+generating a probe of its own). Paused by hand at 47 min of the 110-minute
+budget, not by the budget.
+
+| bucket | rows | median | mean | p90 | at cap | gen-tokens/row |
+|---|---|---|---|---|---|---|
+| en | 730/730 | 0.87 | 0.87 | 1.16 | 0.0 % | 235 |
+| hi | **256/500** | 1.07 | 1.08 | 1.40 | 2.3 % | 869 |
+| cm | 24/701 | 1.02 | 1.09 | 1.47 | 0.0 % | 161 |
+| te | 56/400 | 0.97 | 0.98 | 1.26 | 1.8 % | 1,864 |
+
+- **Both fixes hold.** `cm` sits at 1.02 median where the `max(8, n/12)` sentence
+  floor produced 1.88 across 470 rows, and `hi`'s plain+0.55 regime came in at
+  0.99 on its probe. Each was predicted by its own 12-passage probe.
+- **A 24-row gate reads low, and that is the finding of this sitting.** `hi`
+  passed at 0.99 on 20 rows and sits at **1.07 median / 1.40 p90** at 256 rows.
+  Still inside 0.75–1.25, so the regime is sound and the gate was right to pass
+  it — but the gate is a tripwire for a *broken* regime, not an estimate of a
+  bucket's final ratio, and it should not be quoted as one. Re-check `hi` at 500.
+- **The Ollama server died once, at 17:53, and restarted itself** (clean restart
+  in its log, 7.3 GiB free, no OOM). The four `hi` requests in flight failed and
+  are left for resume; those are the only 4 failures of the sitting. Cost: four
+  retryable rows and zero written rows. Rows are flushed as they land, so the
+  kill at pause also left no partial line.
+- **Throughput:** 80.8 tok/s run average, per-stream 20.8, concurrency x3.8–4.4.
+  `OLLAMA_NUM_PARALLEL:4` confirmed from the server's own startup banner — the
+  user environment does not carry it, so check the banner, not `HKCU`.
+- **Remaining for qwen7b: hi 244, cm 677, te 344.** The bulk queue runs
+  hi → cm → te, so this sitting only ever worked `hi`. `te` is the cost: 14 % of
+  the remaining rows but ~60 % of the remaining tokens, at 1,864 gen-tokens/row
+  against `hi` 869 and `cm` 161. Estimate ~135 min for `te` alone, ~225 min for
+  all three — the runner's own ETA understates it, since it extrapolates rows/sec
+  uniformly across buckets whose per-row cost differs 11x.
+
+**Verify / resume:** `python -m src.data.generate --generator qwen7b --buckets
+hi,cm,te --max-minutes 110` — reads the 1,066 rows on disk, re-judges each
+bucket's first 24 rows against the gate, and continues where it stopped.
+
+**Next:** finish `hi` and `cm`, then `te` on its own sitting. Watch per-stream
+decode when `te` starts — Run 1 was halted on 2026-09-18 at 11.7 tok/s against a
+15 tok/s floor, and this sitting never reached `te`.
+
+---
+
 ## 2026-09-19 — the length gate moved into the code
 
 The gate that decides whether a bucket's prompt regime is working existed only
