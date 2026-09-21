@@ -1,0 +1,27 @@
+generated 72/72 rows (deadline 23:25)
+human (same 24 passages): Hindi share median 0.29, zero-Hindi 0, emoji 0
+English floor (300 en human passages): Hindi-lexicon share median 0.028
+
+v1_mix: n=24  PASS
+  length median 0.97 (mean 1.04, p90 1.49), in band 15/24, above 3, below 6, cap 0 %
+  0-40 median 1.13 (n=14), 40+ median 0.73 (n=10)
+  Hindi share median 0.32 vs human 0.29 (ratio 1.13), zero-Hindi 0, emoji 0, Devanagari 0, other-script 0, done ['stop']
+    [15->17] guruji truly mahan h, kya nahi prabh se icha hai abhi to 100 saal ke age hain!
+    [15->24] Olymp Trade work karte hai trading apps mein, par betting karne ka risk banta hai. Aap equity, currency, index se profit kar sakte ho.
+    [16->37] ye sab kuch foreign se education project ka agent hai uski aur unke kisi bhi NGO ke account se related works hain abhi toh ye true hairoman script mein likha ga
+
+v2_mix_nosent: n=24  FAIL
+  length median 0.80 (mean 0.92, p90 1.39), in band 8/24, above 5, below 11, cap 0 %
+  0-40 median 1.02 (n=14), 40+ median 0.62 (n=10)
+  Hindi share median 0.32 vs human 0.29 (ratio 1.12), zero-Hindi 0, emoji 1, Devanagari 1, other-script 0, done ['stop']
+    [15->25] gurudev bahut bhi mahan hai, 100 saal ke pehle to kya lagta hai life chota ho jaata hai prabh se ye acha icha hai 😊roman.script
+    [15->26] Olymp Trade par trade karna hi trick hai, dekh bahut research karna zarur, trading ke liye demo account pe practice fir baad real account open karna.
+    [16->20] ye sab foreign se education ke karyave aur funded NGO ka agent hai, baaki toh nahi uskehte romanscript mein kuch.
+
+v3_mix_half: n=24  FAIL
+  length median 0.88 (mean 1.02, p90 1.66), in band 11/24, above 6, below 7, cap 0 %
+  0-40 median 1.18 (n=14), 40+ median 0.68 (n=10)
+  Hindi share median 0.33 vs human 0.29 (ratio 1.17), zero-Hindi 0, emoji 1, Devanagari 0, other-script 0, done ['stop']
+    [15->24] Gurudev aap bahut acche hain, Roman script mein likho, śhrīnām śhivāya ke upaśhtrit hain, isiliye 100 saal tak jivan rahne ka prayas karte hain.
+    [15->18] Olymp Trade mein ho kuch trade select karke amount deposit karo, then follow market aur trade hota rahe.
+    [16->27] Ye sab foreign se education ke project ko India me lagane ka agent hai, kyunki uski job apni madad se aur funded NGO ke through hoti hai.

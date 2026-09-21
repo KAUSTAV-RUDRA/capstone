@@ -1,0 +1,39 @@
+Console output of cm_short_probe.py, run 2026-09-21 22:46 (qwen2.5:7b-instruct Q4_K_M,
+Ollama 0.17.1), copied verbatim. The "live" column is the qwen7b cm rows that were on disk
+at the time. They are to be discarded and regenerated (docs/progress.md 2026-09-21), after
+which this script's control no longer exists and a rerun fails its prompt assertion.
+
+cm prompts 701, on disk 701, 0-40 bin 413; fertility 1.672 (Qwen/Qwen2.5-7B-Instruct)
+whole bin on disk: median 1.75, human median 20
+model qwen2.5:7b-instruct {'backend': 'ollama', 'server_version': '0.17.1', 'quantization': 'Q4_K_M', 'parameter_size': '7.6B', 'digest': '845dbda0ea48'}
+
+id                            hum  ask  live   var  live/h  var/h  done
+qwen7b__cm_comi_lingua_TN:train:1071   16   25    36    16    2.25   1.00  stop
+qwen7b__cm_comi_lingua_TN:train:768   18   25    36    13    2.00   0.72  stop
+qwen7b__cm_hinge_64            19   25    47    12    2.47   0.63  stop
+qwen7b__cm_comi_lingua_TN:train:1544   21   25    38    14    1.81   0.67  stop
+qwen7b__cm_comi_lingua_TN:train:2397   16   25    54    14    3.38   0.88  stop
+qwen7b__cm_comi_lingua_TN:train:2373   15   25    32    16    2.13   1.07  stop
+qwen7b__cm_comi_lingua_TN:train:1086   33   25    32    12    0.97   0.36  stop
+qwen7b__cm_hinge_1782          16   25    40    13    2.50   0.81  stop
+qwen7b__cm_hinge_223           17   25    48    15    2.82   0.88  stop
+qwen7b__cm_comi_lingua_TN:train:388   22   25    37    17    1.68   0.77  stop
+qwen7b__cm_comi_lingua_TN:train:2447   30   25    34    14    1.13   0.47  stop
+qwen7b__cm_comi_lingua_TN:train:347   22   25    34     8    1.55   0.36  stop
+
+live template (on disk): cm: 12 rows, machine/human length median 2.07 (mean 2.06, p90 2.79), 0 % at the token cap
+  in band 2/12, above 1.25 10, below 0.75 0
+  median words 36.5, devanagari share max 0.00, done ['stop']
+  gate: FAIL - machine/human length ratio 2.07 is outside 0.75-1.25 (over-production; mean 2.06, p90 2.79, 83 % of rows above 1.25)
+
+short variant: cm: 12 rows, machine/human length median 0.75 (mean 0.72, p90 0.99), 0 % at the token cap
+  in band 6/12, above 1.25 0, below 0.75 6
+  median words 14.0, devanagari share max 0.00, done ['stop']
+  gate: FAIL - machine/human length ratio 0.75 is outside 0.75-1.25 (under-production; mean 0.72, p90 0.99, 0 % of rows above 1.25)
+
+Follow-up check on the same rows (Hindi function-word share, same lexicon as cm_codemix_probe.py):
+  human    median 0.28, zero-Hindi rows 0/12, with emoji 0/12
+  live     median 0.03, zero-Hindi rows 3/12, with emoji 0/12
+  variant  median 0.00, zero-Hindi rows 7/12, with emoji 5/12
+  human cm bucket, rows with emoji: 0/2200
+  live qwen7b cm rows with emoji: 28/701

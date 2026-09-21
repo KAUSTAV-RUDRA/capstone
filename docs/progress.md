@@ -85,8 +85,8 @@ have failed at 24 rows. All three probed variants read ≥ 1.1. Length alone let
 the defect through. Open: where the lexicon lives, and whether discourse markers
 (yaar, bhai) count.
 
-State: nothing generated into `data/` and nothing deleted. Probe scripts and rows
-are kept outside the repo in the session scratchpad (`cm_short_probe.*`,
+State: nothing generated into `data/` and nothing deleted. Probe scripts, rows and
+summaries are committed under `scripts/probes/` (`cm_short_probe.*`,
 `cm_codemix_probe.*`). Next: the user decides on v1 (and its 40+ split) before
 the 701 rows are regenerated.
 
