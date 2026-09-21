@@ -765,6 +765,9 @@ every row at 0.5 or 1.5 and pass untouched. That was a one-bucket suspicion on
 2026-09-19; two buckets now support it.
 
 **Decision: add a dispersion check to the gate — but not this sitting.**
+> **Superseded 2026-09-20** by "the gate fix is a stratified probe, not a spread
+> threshold" below: the drift is a selection effect, not a sample-size problem,
+> and no dispersion threshold was added.
 Deferred until `te` and `hi` are complete, for two reasons. The threshold should
 be set from settled p90 values (`te` 1.25, `hi` 1.40) rather than guessed. And
 changing the gate mid-corpus would leave one generator's rows judged under two
@@ -801,6 +804,84 @@ so the queue had not reached the long passages.
 against `hi`'s 869 and `cm`'s 161 — which is a budget fact, not a speed fault.
 Run 1's halt belongs to that run's configuration and the corpus section should
 describe it that way.
+
+---
+
+## 2026-09-20 — the gate fix is a stratified probe, not a spread threshold
+
+**Supersedes the deferred dispersion check** recorded earlier on 2026-09-20.
+That entry read the drift between a bucket's gate figure and its settled median
+as a sample-size problem and proposed adding a spread threshold once `te` and
+`hi` finished. Finishing all four buckets shows the diagnosis was wrong, and the
+correct fix is cheaper and catches strictly more.
+
+### What the completed corpus shows
+
+| bucket | gate (24) | settled | n | drift | outside 0.75–1.25 |
+|---|---|---|---|---|---|
+| en | 0.87 | 0.87 | 730 | **+0.00** | 34.7 % |
+| te | 0.99 | 0.94 | 400 | −0.04 | 24.8 % |
+| hi | 1.00 | 1.10 | 500 | +0.10 | 34.0 % |
+| cm | 1.02 | **1.39** | 701 | **+0.38** | **67.0 %** |
+
+`en` is the control and it settles exactly where its probe read it. A gate whose
+problem was sample size would drift on `en` too. It does not, so the drift is
+not noise — it is a selection effect that varies by bucket.
+
+### The cause: the probe is the head of the list, not a sample of the bucket
+
+Probe rows were `pending[:24]` — the head of a list sorted by human id — so the
+probe inherits whatever length mix that ordering front-loads. For `cm` the two
+distributions are not close:
+
+| | human words, median | share in the 0–40 bin |
+|---|---|---|
+| first 24 (the probe) | **82** | 12.5 % (3 of 24) |
+| all 701 | **26** | **59 % (413 of 701)** |
+
+### The defect is bin-local, which is why this mattered
+
+| human-length bin | n | median | in band |
+|---|---|---|---|
+| **0–40** | **413** | **1.75** | **no** |
+| 40–70 | 74 | 0.94 | yes |
+| 70–100 | 78 | 1.21 | yes |
+| 100–150 | 79 | 1.07 | yes |
+| 150–250 | 49 | 1.00 | yes |
+| 250+ | 8 | 1.36 | no (n = 8) |
+
+Every bin from 40 words up is inside the band. `cm` fails as a bucket because
+the bin that fails is 59 % of it. A probe that under-samples that bin by 5x
+cannot see the defect at any sample size — and a spread threshold would not have
+saved it either, since the probe's own 24 rows are mostly well-behaved passages
+whose spread is unremarkable. **The fix has to change which rows are probed, not
+what statistic is computed over them.**
+
+### Decision
+
+`run_with_gates` draws its probe with `stratified_probe`, allocating the 24 rows
+proportionally across the bucket's `n_words` bins. It reuses `stratified_cap`'s
+largest-remainder allocation, so the probe and the per-generator bucket caps
+stratify by the same rule and a resume draws the same passages. Prompts without
+`n_words` keep the previous head order.
+
+On `cm`'s real shape this puts ~14 of 24 probe rows in the 0–40 bin, which reads
+1.75 and **fails the bucket at 24 rows** — what the gate exists to do. Covered by
+`test_a_bin_local_defect_fails_the_gate`, with
+`test_head_order_probe_would_have_missed_the_bin_local_defect` asserting the old
+selection passes the same bucket, so the regression cannot come back silently.
+
+**No dispersion threshold is added.** The spread figures above (24–35 % of rows
+outside the band even in healthy buckets) are a property of prompt-matched
+generation at these lengths, not a defect signal, and thresholding them would
+fail `en` — a bucket with zero drift and a correct regime. Revisit only if a
+bucket is ever found whose median and bins are all in band while its tails are
+not.
+
+**This does not retroactively fix `cm`'s 701 rows.** They were generated under
+the old probe and sit at 1.39; the decision on them — regenerate the 0–40 bin
+under a corrected prompt, drop the bin, or accept and document — is open, and
+nothing has been discarded.
 
 ---
 

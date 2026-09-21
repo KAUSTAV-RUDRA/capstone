@@ -701,6 +701,10 @@ def make_hf_processor(model, tokenizer, generator: str, role: str, model_id: str
 #: when someone remembers to run it, and its first version tested only the lower
 #: bound and waved a 1.72 through. Both bounds now live here (decisions.md
 #: 2026-09-19).
+#:
+#: The probe rows are drawn stratified across the bucket's length bins from
+#: 2026-09-20: taking the head of an id-sorted list let cm's short-passage
+#: defect sit outside the probe entirely (decisions.md 2026-09-20).
 PROBE_ROWS = 24
 GATE_RATIO_RANGE: tuple[float, float] = (0.75, 1.25)
 GATE_MAX_CAP_PCT = 20.0
@@ -825,6 +829,38 @@ def bucket_rows(out_path: Path, bucket: str, limit: int) -> list[dict[str, Any]]
     return rows
 
 
+def stratified_probe(items: Sequence[dict[str, Any]], k: int) -> list[dict[str, Any]]:
+    """``k`` of ``items``, drawn across their length bins instead of off the head.
+
+    The gate judges a bucket's first rows, so which rows those are decides what
+    it can see. Taking them from the head of an id-sorted list makes the probe
+    inherit whatever length mix that ordering happens to front-load, and a
+    defect that lives in one bin is then invisible in proportion to how badly
+    the head misrepresents the bucket.
+
+    Measured 2026-09-20 on the finished cm bucket: its first 24 rows had a
+    median human length of 82 words against the bucket's 26, and 12.5 % of them
+    in the 0-40 bin against 59 % across all 701. cm's over-production was
+    entirely bin-local — 413 short rows at median 1.75 while every bin from 40
+    words up sat inside 0.75-1.25 — so the probe read 1.02, passed, and the
+    bucket settled at 1.39. A proportional draw puts ~14 short rows in the same
+    24 and fails it at the probe, which is the whole point of the gate.
+
+    Reuses :func:`stratified_cap`'s largest-remainder allocation, so the probe
+    and the bucket caps stratify by the same rule and a resume draws the same
+    passages. Items without ``n_words`` keep the previous head order, which is
+    what the unit tests and any caller with bare prompts rely on.
+    """
+    if k <= 0:
+        return []
+    if k >= len(items):
+        return list(items)
+    if not all("n_words" in item for item in items):
+        return list(items[:k])
+    chosen = set(stratified_cap(items, k))
+    return [item for item in items if item["id"] in chosen]
+
+
 def run_with_gates(buckets: Sequence[str], prompts: Sequence[dict[str, Any]], *,
                    done_ids: set[str], out_path: Path,
                    run_phase: Callable[..., RunReport],
@@ -835,9 +871,13 @@ def run_with_gates(buckets: Sequence[str], prompts: Sequence[dict[str, Any]], *,
 
     Every bucket is taken to ``probe_rows`` rows and judged before the next one
     is touched, so a prompt regime that does not transfer costs 24 rows rather
-    than a bucket. Rows already on disk from an earlier sitting count towards the
-    probe, so a resume judges what is there instead of generating a fresh 24 —
-    and a bucket whose bad rows were never cleaned up keeps failing, by design.
+    than a bucket. The probe is drawn across the bucket's length bins rather
+    than off the head of the list (:func:`stratified_probe`), because a bin-local
+    defect is otherwise invisible to it — that is how cm passed at 1.02 and
+    settled at 1.39 over 701 rows (decisions.md 2026-09-20). Rows already on disk
+    from an earlier sitting count towards the probe, so a resume judges what is
+    there instead of generating a fresh 24 — and a bucket whose bad rows were
+    never cleaned up keeps failing, by design.
 
     The probe rows are ordinary corpus rows written to the same file, and the
     bulk phase receives the full prompt list with ``done_ids`` already updated,
@@ -854,9 +894,11 @@ def run_with_gates(buckets: Sequence[str], prompts: Sequence[dict[str, Any]], *,
         on_disk = len(in_bucket) - len(pending)
         shortfall = min(max(0, probe_rows - on_disk), len(pending))
         if shortfall:
-            log.info("bucket %s: generating %d rows for the gate probe (%d already on disk)",
-                     bucket, shortfall, on_disk)
-            phase = run_phase(pending[:shortfall], f"{bucket} gate-probe")
+            probe = stratified_probe(pending, shortfall)
+            log.info("bucket %s: generating %d rows for the gate probe (%d already on disk), "
+                     "stratified across %d length bins",
+                     bucket, shortfall, on_disk, len({p.get("n_words") for p in probe}))
+            phase = run_phase(probe, f"{bucket} gate-probe")
             if phase.stopped_by_time:
                 log.warning("bucket %s: gate probe stopped at --max-minutes — not starting the bulk run",
                             bucket)

@@ -345,6 +345,84 @@ def test_rows_already_on_disk_count_towards_the_probe() -> None:
         assert seen == [100], seen         # the bulk phase only
 
 
+def _cm_shaped_prompts() -> list[dict]:
+    """cm as it finished: 288 long passages, then 413 short ones (59 % of the bucket).
+
+    Ordered long-first so the head of the list is exactly the blind spot — the
+    real cm's first 24 rows had a median human length of 82 against the bucket's
+    26 (decisions.md 2026-09-20).
+    """
+    return ([{"id": f"qwen7b__cm-L{i:03d}", "bucket": "cm", "n_words": 150,
+              "human_length_words": 150} for i in range(288)]
+            + [{"id": f"qwen7b__cm-S{i:03d}", "bucket": "cm", "n_words": 25,
+                "human_length_words": 20} for i in range(413)])
+
+
+def _binned_phase(out: Path, done: set[str], seen: list[int]):
+    """A run_phase with cm's real defect shape: short passages at 1.75, the rest at 1.0."""
+    def run_phase(items, label="passages"):
+        seen.append(len(items))
+        with open(out, "a", encoding="utf-8") as fh:
+            for item in items:
+                human = item["human_length_words"]
+                machine = round(human * (1.75 if human <= 40 else 1.0))
+                fh.write(json.dumps({"id": item["id"], "language": item["bucket"],
+                                     "length_words": machine, "human_length_words": human,
+                                     "truncated": False}) + "\n")
+        done.update(item["id"] for item in items)
+        return resumable.RunReport(total=len(items), processed=len(items))
+    return run_phase
+
+
+def test_probe_is_stratified_across_length_bins() -> None:
+    prompts = _cm_shaped_prompts()
+    # The head of the list holds none of the short passages: the old blind spot.
+    assert sum(1 for p in prompts[:24] if p["n_words"] == 25) == 0
+    probe = generate.stratified_probe(prompts, 24)
+    assert len(probe) == 24
+    short = sum(1 for p in probe if p["n_words"] == 25)
+    assert 13 <= short <= 15, f"413/701 of 24 is 14.1, got {short}"
+    assert generate.stratified_probe(prompts, 24) == probe          # deterministic
+    # Without bin information the previous head order is kept, so bare prompts still work.
+    bare = [{"id": f"x-{i}", "bucket": "cm"} for i in range(50)]
+    assert generate.stratified_probe(bare, 24) == bare[:24]
+
+
+def test_a_bin_local_defect_fails_the_gate() -> None:
+    # cm at 701 rows: 0-40 was 413 rows at median 1.75 while every bin from 40
+    # words up sat in band, so the bucket settled at 1.39 after passing at 1.02.
+    # A stratified probe carries ~14 short rows and fails it at 24.
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "qwen7b.jsonl"
+        prompts = _cm_shaped_prompts()
+        done: set[str] = set()
+        seen: list[int] = []
+        try:
+            generate.run_with_gates(["cm"], prompts, done_ids=done, out_path=out,
+                                    run_phase=_binned_phase(out, done, seen))
+        except SystemExit as exc:
+            assert "cm" in str(exc) and "over-production" in str(exc), exc
+        else:
+            raise AssertionError("a bin-local defect must abort the run")
+        assert seen == [24], seen          # the probe ran; the other 677 never did
+
+
+def test_head_order_probe_would_have_missed_the_bin_local_defect() -> None:
+    # The regression this fix exists for: judging the first 24 of the same bucket
+    # passes it, which is what happened to cm on 2026-09-19.
+    prompts = _cm_shaped_prompts()
+    rows = [{"id": p["id"], "language": "cm", "human_length_words": p["human_length_words"],
+             "length_words": round(p["human_length_words"] * (1.75 if p["human_length_words"] <= 40 else 1.0)),
+             "truncated": False} for p in prompts[:24]]
+    assert generate.gate_reasons(generate.gate_stats("cm", rows)) == [], \
+        "head-order probing passes the bucket — the blind spot being fixed"
+    stratified = generate.stratified_probe(prompts, 24)
+    rows = [{"id": p["id"], "language": "cm", "human_length_words": p["human_length_words"],
+             "length_words": round(p["human_length_words"] * (1.75 if p["human_length_words"] <= 40 else 1.0)),
+             "truncated": False} for p in stratified]
+    assert generate.gate_reasons(generate.gate_stats("cm", rows)), "stratified probing must catch it"
+
+
 def test_a_bucket_whose_rows_are_bad_keeps_failing_on_resume() -> None:
     # Deliberate: the probe rows stay on disk, so the next run reads them back and
     # fails the same gate until they are removed. No --skip-gate flag exists.
