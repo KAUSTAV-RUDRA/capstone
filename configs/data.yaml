@@ -224,6 +224,12 @@ machine_corpus:
     ratio_min: 0.75
     ratio_max: 1.25
     max_cap_pct: 20
+    # Code-mix check (docs/progress.md 2026-09-21): for these buckets the probe
+    # rows' median romanised-Hindi function-word share must be at least
+    # codemix_min_ratio of the same passages' human text. Length alone passed
+    # 701 cm rows at the English floor (0.02-0.04 against a human 0.30-0.33).
+    codemix_buckets: [cm]
+    codemix_min_ratio: 0.667
   assignment:
     heldout_share: 0.30             # per held-out generator; the two slices are disjoint
   # Per-bucket cap on passages PER GENERATOR. Indic decoding is the cost driver:

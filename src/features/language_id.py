@@ -9,7 +9,44 @@ Phase 3 (per-bucket routing).
 """
 from __future__ import annotations
 
+import re
 from typing import Any
+
+#: Closed-class romanised Hindi: postpositions, copulas, negation, pronouns,
+#: conjunctions, auxiliaries. Function words, not content words, because a text
+#: only carries them if Hindi is actually running through its grammar — a
+#: machine cm row at the English floor scored 0.02-0.04 on this list against
+#: 0.30-0.33 for the human text it was matched to (docs/progress.md 2026-09-21).
+#:
+#: Known collisions with English ("to", "me", "par", "log") give English text a
+#: floor of ~0.03. The generation gate compares a machine text against its own
+#: human passage, so the floor cancels there; anything reading this as an
+#: absolute code-mix ratio must allow for it.
+ROMANISED_HINDI_FUNCTION_WORDS: frozenset[str] = frozenset(
+    "hai hain ho ka ki ke ko se mein me nahi nhi na kya bhi to toh tha thi aur ek kar karo karna "
+    "raha rahe rhe hota hoga ab bas kuch sab log wala wali abhi apna apne mera meri tera tum aap "
+    "hum ye yeh wo woh kaise kyun kyu jo agar par pe".split())
+
+#: Discourse fillers deliberately NOT counted. They are the cheapest way to look
+#: Hinglish without being it — "great session today, yaar" is English with a tag —
+#: so a generator that bolts them onto English sentences must not score as mixed.
+EXCLUDED_FILLERS: frozenset[str] = frozenset({"yaar", "yar", "bhai"})
+
+_LATIN_WORD_RE = re.compile(r"[a-z]+")
+
+
+def romanised_hindi_share(text: str) -> float:
+    """Share of a text's Latin-script words that are romanised Hindi function words.
+
+    A proxy for how much Hindi grammar runs through Romanised code-mixed text,
+    used by the generation gate (``src.data.generate``) to catch cm rows that
+    are English in all but name. Devanagari is not counted, by design: cm is the
+    Romanised bucket. 0.0 for text with no Latin-script words.
+    """
+    words = _LATIN_WORD_RE.findall(text.lower())
+    if not words:
+        return 0.0
+    return sum(word in ROMANISED_HINDI_FUNCTION_WORDS for word in words) / len(words)
 
 
 def detect_language(text: str) -> str:

@@ -423,6 +423,81 @@ def test_head_order_probe_would_have_missed_the_bin_local_defect() -> None:
     assert generate.gate_reasons(generate.gate_stats("cm", rows)), "stratified probing must catch it"
 
 
+HINGLISH_HUMAN = "yeh exam mera sabse tough tha, par main nahi ruka aur kal bhi padhai karunga"
+ENGLISH_MACHINE = "The exam was the toughest one this term, but I kept going and will study again tomorrow"
+HINGLISH_MACHINE = "exam bahut tough tha, par maine nahi chhoda aur kal phir se padhai karni hai"
+
+
+def _cm_codemix_prompts(n: int = 60) -> list[dict]:
+    return [{"id": f"qwen7b__cm-{i:03d}", "bucket": "cm", "n_words": 25, "human_length_words": 15,
+             "text": HINGLISH_HUMAN} for i in range(n)]
+
+
+def _text_phase(out: Path, done: set[str], seen: list[int], text: str):
+    """A run_phase writing ``text`` at exactly human length: in band on length, always."""
+    def run_phase(items, label="passages"):
+        seen.append(len(items))
+        with open(out, "a", encoding="utf-8") as fh:
+            for item in items:
+                fh.write(json.dumps({"id": item["id"], "language": item["bucket"], "text": text,
+                                     "length_words": item["human_length_words"],
+                                     "human_length_words": item["human_length_words"],
+                                     "truncated": False}) + "\n")
+        done.update(item["id"] for item in items)
+        return resumable.RunReport(total=len(items), processed=len(items))
+    return run_phase
+
+
+def test_codemix_gate_fails_english_cm_rows_and_passes_hinglish() -> None:
+    # The 2026-09-21 defect: cm rows in band on length, English in all but name.
+    prompts = _cm_codemix_prompts(24)
+    human = {p["id"]: p["text"] for p in prompts}
+    def rows(text):
+        return [{"id": p["id"], "language": "cm", "text": text, "length_words": 15,
+                 "human_length_words": 15, "truncated": False} for p in prompts]
+    english = generate.gate_stats("cm", rows(ENGLISH_MACHINE), human_texts=human)
+    reasons = generate.gate_reasons(english)
+    assert len(reasons) == 1 and reasons[0].startswith("code-mix"), reasons   # length alone passes
+    assert english.codemix == 0.0 and english.human_codemix > 0.3, english
+    assert generate.gate_reasons(generate.gate_stats("cm", rows(HINGLISH_MACHINE), human_texts=human)) == []
+    # Without human text there is nothing to be a fraction of: length only, as before.
+    assert generate.gate_reasons(generate.gate_stats("cm", rows(ENGLISH_MACHINE))) == []
+    # A human passage with no Hindi in it gives no floor, so it cannot fail the check.
+    no_hindi = {k: ENGLISH_MACHINE for k in human}
+    assert generate.gate_reasons(generate.gate_stats("cm", rows(ENGLISH_MACHINE), human_texts=no_hindi)) == []
+
+
+def test_run_with_gates_aborts_cm_on_codemix_with_length_in_band() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "qwen7b.jsonl"
+        done: set[str] = set()
+        seen: list[int] = []
+        try:
+            generate.run_with_gates(["cm"], _cm_codemix_prompts(), done_ids=done, out_path=out,
+                                    run_phase=_text_phase(out, done, seen, ENGLISH_MACHINE))
+        except SystemExit as exc:
+            assert "code-mix" in str(exc) and "over-production" not in str(exc), exc
+        else:
+            raise AssertionError("English cm rows must abort the run at the probe")
+        assert seen == [24], seen          # the probe ran; the other 36 never did
+
+
+def test_codemix_check_applies_only_to_listed_buckets() -> None:
+    # The same English rows pass when cm is not code-mix checked, and Hinglish
+    # rows pass when it is: the check keys on the bucket list, not on the text.
+    for buckets, text in (((), ENGLISH_MACHINE), (("cm",), HINGLISH_MACHINE)):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "qwen7b.jsonl"
+            done: set[str] = set()
+            seen: list[int] = []
+            generate.run_with_gates(["cm"], _cm_codemix_prompts(), done_ids=done, out_path=out,
+                                    run_phase=_text_phase(out, done, seen, text),
+                                    codemix_buckets=buckets)
+            assert seen == [24, 60], (buckets, seen)    # probe, then the bulk run
+    cfg = load_config(DATA_CONFIG)["machine_corpus"]["gate"]
+    assert cfg["codemix_buckets"] == ["cm"] and abs(cfg["codemix_min_ratio"] - 2 / 3) < 0.001
+
+
 def test_a_bucket_whose_rows_are_bad_keeps_failing_on_resume() -> None:
     # Deliberate: the probe rows stay on disk, so the next run reads them back and
     # fails the same gate until they are removed. No --skip-gate flag exists.

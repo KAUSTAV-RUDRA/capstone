@@ -88,6 +88,7 @@ from pathlib import Path
 from typing import Any, Callable, Sequence
 
 from src.data.schema import LABEL_MACHINE, LANGUAGE_BUCKETS
+from src.features.language_id import romanised_hindi_share
 from src.utils.config import load_config
 from src.utils.io import read_jsonl
 from src.utils.resumable import (DEFAULT_BATCH_SIZE, RunReport, read_done_ids, run_concurrent,
@@ -709,6 +710,14 @@ PROBE_ROWS = 24
 GATE_RATIO_RANGE: tuple[float, float] = (0.75, 1.25)
 GATE_MAX_CAP_PCT = 20.0
 
+#: Code-mix check (2026-09-21). For these buckets the probe rows' median
+#: romanised-Hindi function-word share must be at least ``GATE_CODEMIX_MIN_RATIO``
+#: of the median for the same passages' human text. Length alone let 701 cm rows
+#: through at 0.02-0.04 against a human 0.30-0.33: English in all but name, and
+#: separable from the human bucket on that alone (docs/progress.md 2026-09-21).
+GATE_CODEMIX_BUCKETS: tuple[str, ...] = ("cm",)
+GATE_CODEMIX_MIN_RATIO = 2 / 3
+
 
 def _percentile(values: Sequence[float], q: float) -> float:
     """Linear-interpolated percentile of an already-sorted sequence."""
@@ -739,15 +748,29 @@ class GateStats:
     p90: float = 0.0
     cap_pct: float = 0.0
     over_pct: float = 0.0
+    #: Median romanised-Hindi share of the rows and of their own human passages;
+    #: None when the bucket is not code-mix checked or no human text was paired.
+    codemix: float | None = None
+    human_codemix: float | None = None
 
     def describe(self) -> str:
-        return (f"{self.bucket}: {self.n} rows, machine/human length median {self.ratio:.2f} "
+        text = (f"{self.bucket}: {self.n} rows, machine/human length median {self.ratio:.2f} "
                 f"(mean {self.mean:.2f}, p90 {self.p90:.2f}), {self.cap_pct:.0f} % at the token cap")
+        if self.codemix is not None:
+            text += f", Hindi share {self.codemix:.2f} vs human {self.human_codemix:.2f}"
+        return text
 
 
 def gate_stats(bucket: str, rows: Sequence[dict[str, Any]],
-               ratio_max: float = GATE_RATIO_RANGE[1]) -> GateStats:
-    """Length statistics for ``rows``, which must already be one bucket's rows."""
+               ratio_max: float = GATE_RATIO_RANGE[1],
+               human_texts: dict[str, str] | None = None) -> GateStats:
+    """Length statistics for ``rows``, which must already be one bucket's rows.
+
+    With ``human_texts`` (row id -> the human passage it was prompted from), also
+    the median romanised-Hindi share of the rows and of those same passages. The
+    comparison is paired on purpose: the probe is 24 rows, so measuring it against
+    the whole bucket's human share would mix a sample with a population.
+    """
     ratios: list[float] = []
     for row in rows:
         human = float(row.get("human_length_words") or 0)
@@ -756,6 +779,13 @@ def gate_stats(bucket: str, rows: Sequence[dict[str, Any]],
     if not ratios:
         return GateStats(bucket, 0)
     ratios.sort()
+    codemix = human_codemix = None
+    if human_texts:
+        paired = [(row.get("text") or "", human_texts[row["id"]]) for row in rows
+                  if row.get("id") in human_texts]
+        if paired:
+            codemix = _percentile(sorted(romanised_hindi_share(m) for m, _ in paired), 0.5)
+            human_codemix = _percentile(sorted(romanised_hindi_share(h) for _, h in paired), 0.5)
     return GateStats(
         bucket=bucket,
         n=len(ratios),
@@ -764,15 +794,20 @@ def gate_stats(bucket: str, rows: Sequence[dict[str, Any]],
         p90=_percentile(ratios, 0.9),
         cap_pct=100.0 * sum(1 for row in rows if row.get("truncated")) / len(rows),
         over_pct=100.0 * sum(1 for r in ratios if r > ratio_max) / len(ratios),
+        codemix=codemix,
+        human_codemix=human_codemix,
     )
 
 
 def gate_reasons(stats: GateStats, ratio_range: tuple[float, float] = GATE_RATIO_RANGE,
-                 max_cap_pct: float = GATE_MAX_CAP_PCT) -> list[str]:
+                 max_cap_pct: float = GATE_MAX_CAP_PCT,
+                 codemix_min_ratio: float = GATE_CODEMIX_MIN_RATIO) -> list[str]:
     """Why this bucket fails the gate; empty means it passes.
 
     Both bounds are tested. Failing only below ``ratio_range[0]`` is what let the
-    cm run reach 470 rows: the watcher saw 1.72 and passed it.
+    cm run reach 470 rows: the watcher saw 1.72 and passed it. The code-mix check
+    runs only when :func:`gate_stats` measured it and the human passages carry
+    any Hindi at all — a zero human share gives nothing to be a fraction of.
     """
     low, high = ratio_range
     reasons: list[str] = []
@@ -786,6 +821,12 @@ def gate_reasons(stats: GateStats, ratio_range: tuple[float, float] = GATE_RATIO
     if stats.cap_pct > max_cap_pct:
         reasons.append(f"{stats.cap_pct:.0f} % of rows hit the token cap, limit {max_cap_pct:.0f} % "
                        f"— they are truncated, not written short")
+    if stats.codemix is not None and stats.human_codemix:
+        floor = codemix_min_ratio * stats.human_codemix
+        if stats.codemix < floor:
+            reasons.append(f"code-mix: romanised-Hindi share median {stats.codemix:.2f} against "
+                           f"{stats.human_codemix:.2f} for the same passages' human text, minimum "
+                           f"{floor:.2f} ({codemix_min_ratio:.2f} of human) — the rows are not Hinglish")
     return reasons
 
 
@@ -866,7 +907,9 @@ def run_with_gates(buckets: Sequence[str], prompts: Sequence[dict[str, Any]], *,
                    run_phase: Callable[..., RunReport],
                    probe_rows: int = PROBE_ROWS,
                    ratio_range: tuple[float, float] = GATE_RATIO_RANGE,
-                   max_cap_pct: float = GATE_MAX_CAP_PCT) -> RunReport:
+                   max_cap_pct: float = GATE_MAX_CAP_PCT,
+                   codemix_buckets: Sequence[str] = GATE_CODEMIX_BUCKETS,
+                   codemix_min_ratio: float = GATE_CODEMIX_MIN_RATIO) -> RunReport:
     """Probe each bucket, gate it, then generate the rest. Aborts if a gate fails.
 
     Every bucket is taken to ``probe_rows`` rows and judged before the next one
@@ -878,6 +921,10 @@ def run_with_gates(buckets: Sequence[str], prompts: Sequence[dict[str, Any]], *,
     from an earlier sitting count towards the probe, so a resume judges what is
     there instead of generating a fresh 24 — and a bucket whose bad rows were
     never cleaned up keeps failing, by design.
+
+    Buckets in ``codemix_buckets`` must also keep at least ``codemix_min_ratio``
+    of their own human passages' romanised-Hindi share: length alone passed cm
+    rows that were English in all but name (docs/progress.md 2026-09-21).
 
     The probe rows are ordinary corpus rows written to the same file, and the
     bulk phase receives the full prompt list with ``done_ids`` already updated,
@@ -903,12 +950,15 @@ def run_with_gates(buckets: Sequence[str], prompts: Sequence[dict[str, Any]], *,
                 log.warning("bucket %s: gate probe stopped at --max-minutes — not starting the bulk run",
                             bucket)
                 return phase
-        stats = gate_stats(bucket, bucket_rows(out_path, bucket, probe_rows), ratio_range[1])
+        human_texts = ({p["id"]: p["text"] for p in in_bucket if p.get("text")}
+                       if bucket in codemix_buckets else None)
+        stats = gate_stats(bucket, bucket_rows(out_path, bucket, probe_rows), ratio_range[1],
+                           human_texts)
         if stats.n == 0:
             log.warning("bucket %s: no rows to judge (every probe request failed) — "
                         "not starting the bulk run", bucket)
             return RunReport(total=len(prompts), already_done=len(prompts) - len(pending))
-        reasons = gate_reasons(stats, ratio_range, max_cap_pct)
+        reasons = gate_reasons(stats, ratio_range, max_cap_pct, codemix_min_ratio)
         if reasons:
             remaining = len([p for p in in_bucket if p["id"] not in done_ids])
             raise SystemExit(gate_failure_message(stats, reasons, out_path, remaining))
@@ -1081,7 +1131,9 @@ def main(argv: list[str] | None = None) -> None:
         probe_rows=int(gate_cfg.get("probe_rows", PROBE_ROWS)),
         ratio_range=(float(gate_cfg.get("ratio_min", GATE_RATIO_RANGE[0])),
                      float(gate_cfg.get("ratio_max", GATE_RATIO_RANGE[1]))),
-        max_cap_pct=float(gate_cfg.get("max_cap_pct", GATE_MAX_CAP_PCT)))
+        max_cap_pct=float(gate_cfg.get("max_cap_pct", GATE_MAX_CAP_PCT)),
+        codemix_buckets=tuple(gate_cfg.get("codemix_buckets", GATE_CODEMIX_BUCKETS)),
+        codemix_min_ratio=float(gate_cfg.get("codemix_min_ratio", GATE_CODEMIX_MIN_RATIO)))
 
     resume = f"python -m src.data.generate --generator {args.generator} --buckets {args.buckets}"
     if args.fraction != 1.0:
