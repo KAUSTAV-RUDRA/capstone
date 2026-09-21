@@ -130,9 +130,16 @@ PROMPT_TEMPLATES: dict[str, str] = {
               'article of at least {n_words} words, written as {n_sentences} or more '
               'full sentences. Do not stop early and do not summarise; develop the '
               'topic in detail.'),
-    "cm": ('{first_sentence}\n\nWrite at least {n_words} words on this topic in casual '
-           'Hindi-English Hinglish, Roman script, the way students text, as '
-           '{n_sentences} or more full sentences. Continue naturally and do not stop early.'),
+    # cm from 2026-09-21. The template it replaces wrote English in all but name
+    # (romanised-Hindi share 0.02-0.04 against a human 0.30-0.33) and ran long on
+    # short passages. Probed 3 variants x 24 stratified passages, then the long
+    # bin's ask: this one lands 0-40 at 1.19 and 40+ at 1.09, Hindi 0.37 against
+    # 0.29, no emoji (scripts/probes/, docs/progress.md 2026-09-21). {n_words} is
+    # the ask from ASK_FROM_HUMAN, not the bin.
+    "cm": ('{first_sentence}\n\nWrite about {n_words} words on this topic in Hinglish: mix Hindi '
+           'and English words within every sentence, with the Hindi written in Roman script, '
+           'casual, like students texting each other, as {n_sentences} or more full sentences. '
+           'No emoji. Continue naturally and do not stop early.'),
 }
 
 #: Which template each bucket uses. Changing this changes the corpus: rows
@@ -340,8 +347,33 @@ def token_budget(n_words: int, fertility: float, overshoot: float = 1.3,
 #:            corpus generated under this template (0.57)
 #:   te 0.62  insistent template, measured under that template (not the 0.31 the
 #:            plain one gave) - compensating a control ratio would double-count
-#:   cm 1.0   insistent template with the fixed sentence floor; 1.08 as-is
+#:   cm 1.0   unused from 2026-09-21: cm's ask comes from ASK_FROM_HUMAN instead
 COMPLIANCE_RATIO: dict[str, float] = {"en": 1.0, "hi": 0.55, "te": 0.62, "cm": 1.0}
+
+#: Buckets whose ask is the human passage's OWN length rather than its bin, with
+#: passages of ``long_from_words`` or more asked for ``human / long_ratio``.
+#: cm needs both. Its bins are coarse where its passages are short: 59 % of cm
+#: sits in the 0-40 bin, where "25" is 1.25x a 20-word passage before the model
+#: writes a word. And one ask ratio does not fit both ends: at ask = human the
+#: probe read 0-40 at 1.13 and 40+ at 0.73, so only the long bin is inflated
+#: (probed 2026-09-21: 1.19 and 1.09). Only ever inflates, like compensated_words.
+ASK_FROM_HUMAN: dict[str, dict[str, float]] = {"cm": {"long_from_words": 40, "long_ratio": 0.75}}
+
+
+def ask_words_for(prompt: dict[str, Any], fertility: float, ratio: float, cap: int,
+                  rule: dict[str, float] | None = None) -> int:
+    """Words to ask for one passage.
+
+    Without ``rule``: the passage's bin, compensated by the bucket's compliance
+    ``ratio`` — every bucket's behaviour before 2026-09-21, unchanged. With an
+    :data:`ASK_FROM_HUMAN` rule: the human length, divided by ``long_ratio`` for
+    passages of ``long_from_words`` or more; the compliance ratio is not applied.
+    """
+    if rule is None:
+        return compensated_words(prompt["n_words"], fertility, ratio, cap)
+    human = int(prompt["human_length_words"])
+    long_ratio = float(rule["long_ratio"]) if human >= int(rule["long_from_words"]) else 1.0
+    return compensated_words(human, fertility, long_ratio, cap)
 
 
 def compensated_words(n_words: int, fertility: float, ratio: float,
@@ -1045,11 +1077,12 @@ def main(argv: list[str] | None = None) -> None:
                                                  budget.get("fallback_tokenizer", "Qwen/Qwen2.5-0.5B"), buckets)
     cap = int(budget.get("cap", 2048))
     ratios = {**COMPLIANCE_RATIO, **(budget.get("compliance_ratio") or {})}
+    ask_rules = {**ASK_FROM_HUMAN, **(budget.get("ask_from_human") or {})}
     for prompt in prompts:
         bucket = prompt["bucket"]
         # Ask for more words than we want, because the model writes short (ratio < 1).
-        prompt["ask_words"] = compensated_words(prompt["n_words"], fertility[bucket],
-                                                float(ratios.get(bucket, 1.0)), cap)
+        prompt["ask_words"] = ask_words_for(prompt, fertility[bucket], float(ratios.get(bucket, 1.0)),
+                                            cap, ask_rules.get(bucket))
         if prompt["ask_words"] != prompt["n_words"]:
             prompt["prompt"] = build_prompt(prompt["text"], bucket, prompt["ask_words"])
         # Budget the passage we WANT (the human length), not the inflated ask.

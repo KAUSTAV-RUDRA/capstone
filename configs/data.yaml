@@ -211,6 +211,10 @@ machine_corpus:
     # inflates the ask, so a bucket that over-produces is fixed by its template,
     # not here: hi is on the plain template at 0.55 for exactly that reason.
     compliance_ratio: {en: 1.0, hi: 0.55, te: 0.62, cm: 1.0}
+    # cm asks from the human passage's own length, not its bin, and inflates only
+    # passages of 40+ words (ask = human / 0.75); compliance_ratio is not applied to
+    # it. Probed 2026-09-21: 0-40 at 1.19, 40+ at 1.09 (docs/progress.md).
+    ask_from_human: {cm: {long_from_words: 40, long_ratio: 0.75}}
     fertility_csv: results/tokenizer_fertility.csv
     fallback_tokenizer: Qwen/Qwen2.5-0.5B   # used when a generator's own tokenizer has no fertility rows
   # Abort gate (decisions.md 2026-09-19). Each bucket is taken to `probe_rows`

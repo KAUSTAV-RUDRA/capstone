@@ -55,9 +55,27 @@ def test_prompt_is_matched_to_the_human_passage() -> None:
 
 def test_cm_prompt_asks_for_romanised_informal_hinglish() -> None:
     prompt = generate.build_prompt("Yaar yeh movie bahut acchi thi.", "cm", 50)
-    for expected in ("Hinglish", "Roman script", "the way students text"):
+    for expected in ("Hinglish", "Roman script", "about 50 words", "No emoji",
+                     "mix Hindi and English words within every sentence", "like students texting"):
         assert expected in prompt, f"cm prompt must say '{expected}'"
     assert "in English" not in prompt
+    assert "at least" not in prompt        # "at least" drove cm long (decisions.md 2026-09-20)
+
+
+def test_cm_asks_from_the_human_length_and_inflates_only_the_long_bin() -> None:
+    rule = generate.ASK_FROM_HUMAN["cm"]
+    def ask(human, n_words):
+        return generate.ask_words_for({"n_words": n_words, "human_length_words": human},
+                                      1.672, 1.0, 3600, rule)
+    assert ask(20, 25) == 20              # the human length, not the bin: 25 is 1.25x of 20
+    assert ask(39, 50) == 39
+    assert ask(40, 50) == 53              # 40 / 0.75: long passages under-produce at ask = human
+    assert ask(69, 50) == 92 and ask(194, 200) == 259      # the 2026-09-21 probe's asks
+    # Without a rule the ask is the compensated bin, exactly as before.
+    assert generate.ask_words_for({"n_words": 100, "human_length_words": 97}, 4.804, 0.55, 3600) == \
+        generate.compensated_words(100, 4.804, 0.55, 3600) == 182
+    cfg = load_config(DATA_CONFIG)["machine_corpus"]["budget"]["ask_from_human"]
+    assert set(cfg) == {"cm"} and cfg["cm"] == rule
 
 
 def test_4bit_threshold_reads_the_size_from_the_model_id() -> None:

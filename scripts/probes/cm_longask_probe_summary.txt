@@ -1,0 +1,29 @@
+generated 24/24 rows; long bin = human >= 40 words, ask = human / 0.75; short bin ask = human
+
+v1 (2026-09-21 probe, ask = human): n=24  DO NOT ADOPT
+  length median 0.97 (mean 1.04, p90 1.49), in band 15/24, cap 0 %
+  0-40 median 1.13 (in band 10/14), 40+ median 0.73 (in band 5/10)
+  Hindi share median 0.32 vs human 0.29, zero-Hindi 0, emoji 0, Devanagari 0, instruction echo 1, done ['stop']
+  gate (length + code-mix): PASS
+
+v1 long-ask (ask = human / 0.75 for 40+): n=24  ADOPT
+  length median 1.15 (mean 1.19, p90 1.57), in band 12/24, cap 0 %
+  0-40 median 1.19 (in band 7/14), 40+ median 1.09 (in band 5/10)
+  Hindi share median 0.37 vs human 0.29, zero-Hindi 0, emoji 0, Devanagari 1, instruction echo 1, done ['stop']
+  gate (length + code-mix): PASS
+
+long passages, paired by passage (human -> v1 -> long-ask, ask):
+    42 ->   25 (0.60) ->   23 (0.55)  ask 56
+    43 ->   40 (0.93) ->   41 (0.95)  ask 57
+    69 ->   46 (0.67) ->   99 (1.43)  ask 92
+    83 ->   63 (0.76) ->  123 (1.48)  ask 111
+    85 ->   60 (0.71) ->   68 (0.80)  ask 113
+    86 ->   58 (0.67) ->  108 (1.26)  ask 115
+    95 ->   59 (0.62) ->  111 (1.17)  ask 127
+   132 ->  111 (0.84) ->  118 (0.89)  ask 176
+   170 ->  140 (0.82) ->  296 (1.74)  ask 227
+   194 ->  151 (0.78) ->  198 (1.02)  ask 259
+
+short-bin rows identical to the v1 run (same prompt, same seed): 3/14
+  [194->198] Namaste! Agar tu pata chala toh monster university ke baad ek movie lagti hai, scare3d. Kya baat hoti hain? Phir bhi kisi bhi college mein life ho jati hai, right? Ab ek nayi friend milegi aur tumhara
+  [170->296] Hey buddy, kya aaj ka paani bhaag raha hai at your place? I hope nahi hai, because we have a big test tomorrow and koi preparation karne ka time bas ek din ho raha hai. Main baat kar raha hun ki aapka

@@ -5,6 +5,65 @@ Newest entries at the top.
 
 ---
 
+## 2026-09-21 (late) — cm: code-mix gate built, long-ask template adopted; rows not yet regenerated
+
+Steps 1–3 of the cm plan. Step 4 (record in decisions.md, delete qwen7b's 701 cm
+rows, regenerate) is **next sitting**. Nothing was deleted or generated into
+`data/` tonight.
+
+1. **Probe evidence committed** (`0e006b3`) to `scripts/probes/`. The scripts,
+   their rows and summaries now take `--config`, and write to `results/probes/` so
+   a rerun cannot overwrite the committed copies.
+2. **Code-mix gate check** (`a796da6`).
+   `src/features/language_id.py: romanised_hindi_share()` over
+   `ROMANISED_HINDI_FUNCTION_WORDS`, with yaar/yar/bhai excluded. In the gate, each
+   probe row is paired with its own human passage. For `gate.codemix_buckets`
+   (`[cm]`) the median share must be ≥ `codemix_min_ratio` (2/3) of the human
+   median. On real data, the original first-24 cm probe (length 1.02, passed) now
+   **fails at 0.02 against 0.31**, and all three probed variants pass at
+   0.32–0.33 against 0.29.
+3. **v1 with the long bin's ask inflated**: same 24 passages, same seeds, ask =
+   human for < 40 words, human / 0.75 for ≥ 40. The sentence clause follows the
+   ask. The adoption rule was set before the run.
+
+| | length median | in band | 0–40 median | 40+ median | Hindi share (human 0.29) | emoji | gate |
+|---|---|---|---|---|---|---|---|
+| v1, ask = human | 0.97 | 15/24 | 1.13 | **0.73** | 0.32 | 0 | pass |
+| **v1, long-ask** | **1.15** | 12/24 | **1.19** | **1.09** | 0.37 | 0 | **pass → ADOPTED** |
+
+Shares here use the gate's word list (without yaar/bhai); v1's 0.32 is unchanged
+by that. Long passages, human → v1 → long-ask: 69→46→99, 95→59→111, 170→140→296,
+42→25→23.
+
+**Adopted with three caveats, for the regeneration to watch:**
+- **Dispersion widened.** Only 12/24 rows are in band against v1's 15, and the
+  long rows scatter 0.55–1.74 (4 of 10 above 1.25). Both bin medians are in band;
+  individual rows often are not.
+- **Run-to-run noise is about ±0.06 on these medians.** The short-bin prompts were
+  identical to v1's and only 3 of 14 rows reproduced (parallel decoding is not
+  seed-deterministic), so 1.13 → 1.19 is noise. With the short bin at 1.19, the
+  upper bound (1.25) is close.
+- **1 row in 24 echoes the instruction** ("roman script"), and 1 contains
+  Devanagari.
+
+**In code:** `PROMPT_TEMPLATES["cm"]` is the probed v1 text. The new
+`ASK_FROM_HUMAN` / `budget.ask_from_human: {cm: {long_from_words: 40, long_ratio: 0.75}}`
+and `ask_words_for()` make cm ask from the human length rather than the bin. The
+compliance ratio is not applied to cm; other buckets are unchanged. Checked by
+rebuilding every qwen7b prompt: **en 730/730, hi 500/500, te 400/400 identical to
+the rows on disk**, cm 0/701 (the new template), and the 24 long-ask probe prompts
+24/24 identical to what the code now builds.
+
+**Do not resume `cm` before step 4.** The 701 old rows still hold every cm id, so
+`generate --buckets cm` reports "complete" without reaching the gate. They must be
+deleted first.
+
+**Verify:** `PYTHONPATH=. venv\Scripts\python.exe tests\data\test_generate.py` →
+31 PASS; `PYTHONPATH=. venv\Scripts\python.exe tests\features\test_language_id.py`
+→ 3 PASS + 1 TODO (the Phase-2 placeholder).
+
+---
+
 ## 2026-09-21 — stratified gate probe committed; `cm` fails on code-mixing, not just length
 
 - **Committed `7d955c6`**: `run_with_gates` draws its probe with
