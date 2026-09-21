@@ -5,6 +5,93 @@ Newest entries at the top.
 
 ---
 
+## 2026-09-21 — stratified gate probe committed; `cm` fails on code-mixing, not just length
+
+- **Committed `7d955c6`**: `run_with_gates` draws its probe with
+  `stratified_probe` (decisions.md 2026-09-20). **Verify:**
+  `PYTHONPATH=. venv\Scripts\python.exe tests\data\test_generate.py` → 27 PASS
+  (without `PYTHONPATH` the `src` import fails).
+
+### Probe 1: short-passage variant, 12 passages from `cm`'s 0–40 bin
+
+Variant: "one or two short sentences … at most N words", N = the bin (25). The
+control is the rows already on disk for the same 12 ids, with their prompts
+checked identical to the live template, so only 12 rows were generated.
+
+| | median m/h | in band | machine words, median |
+|---|---|---|---|
+| live template (on disk) | 2.07 | 2/12 | 36.5 |
+| short variant | **0.747** | 6/12 | 14 |
+
+Machine length is near-flat inside the bin under both templates (~36 and ~14
+words), so the ratio tracks 1/human length. The variant also lost the Hindi
+(7/12 rows with none) and added emoji to 5/12; the human `cm` bucket has emoji in
+0 of 2,200 rows.
+
+### The real `cm` defect is code-mixing
+
+Hindi function-word share: the share of a text's words found in a fixed
+romanised-Hindi lexicon (hai, ka, nahi, yaar, …). Crude, but held constant across
+every figure below.
+
+| human-length bin | n | human | qwen7b `cm` on disk | machine rows with zero Hindi |
+|---|---|---|---|---|
+| 0–40 | 413 | 0.33 | 0.04 | 75 |
+| 40–100 | 152 | 0.31 | 0.02 | 34 |
+| 100+ | 136 | 0.30 | 0.02 | 3 |
+
+The same lexicon scores **0.028 on English human text**, so the live `cm` rows sit
+at the English floor in every bin. A detector could tell `cm` human from machine
+on the amount of Hindi alone. **Decision:** all 701 qwen7b `cm` rows will be
+regenerated once a template passes. Regenerating only the 0–40 bin would leave the
+code-mixing defect in place. Nothing has been deleted.
+
+### Probe 2: 3 templates × 24 passages, stratified across `cm`'s length bins
+
+The 24 are `stratified_probe(cm, 24)`, n_words bins 25:14, 50:3, 100:4, 150:2,
+200:1, human median 26 words, human Hindi share 0.29. Same model, decoding,
+`num_predict` and per-passage seed as the real run. All three variants use "about
+N words" with N = the **human** length (not the bin), "mix Hindi and English words
+within every sentence, with the Hindi written in Roman script, casual, like
+students texting each other", and "No emoji." Each variant changes one thing
+against v1.
+
+| variant | length median | in band | 0–40 / 40+ median | Hindi share (human 0.29) | zero-Hindi | emoji | verdict |
+|---|---|---|---|---|---|---|---|
+| **v1** mix + sentence clause `max(2, n/15)` | **0.97** | 15/24 | 1.13 / **0.73** | 0.32 | 0 | 0 | **PASS** |
+| v2 = v1 without the sentence clause | 0.80 | 8/24 | 1.02 / 0.62 | 0.32 | 0 | 1 | FAIL (emoji) |
+| v3 = v1 + "roughly half the words Hindi" | 0.88 | 11/24 | 1.18 / 0.68 | 0.33 | 0 | 1 | FAIL (emoji) |
+
+Pass rule: length median in 0.75–1.25 AND Hindi share ≥ 0.20 AND zero emoji rows.
+No row hit the token cap, and every row stopped naturally.
+
+**v1 carries two caveats that the pass rule does not test:**
+- **Its 0.97 median hides a split in opposite directions.** Short passages read
+  1.13, and passages of 40+ words read 0.73: 8 of those 10 rows are below 0.85
+  (42→25, 69→46, 95→59). This is the bin-local pattern again, smaller and
+  flipped. The 40+ group is only n = 10.
+- **Instruction echo.** 1 of 24 v1 rows contains "roman script mein likha gaya";
+  v2 and v3 each have 2, and the human texts have 0. A leaked prompt phrase is a
+  detector shortcut, so either Part 13 cleaning or the template has to handle it.
+
+v2 shows the sentence clause still matters for length. v3's quantified mix
+bought nothing (0.33 against 0.32) and put IAST diacritics in 2 rows.
+
+### Proposed, not implemented: a code-mix check in the gate for `cm`
+
+The probe rows' median Hindi share must be at least 2/3 of the median share of
+the same passages' human texts. The live regime reads ~0.1 of human and would
+have failed at 24 rows. All three probed variants read ≥ 1.1. Length alone let
+the defect through. Open: where the lexicon lives, and whether discourse markers
+(yaar, bhai) count.
+
+State: nothing generated into `data/` and nothing deleted. Probe scripts and rows
+are kept outside the repo in the session scratchpad (`cm_short_probe.*`,
+`cm_codemix_probe.*`). Next: the user decides on v1 (and its 40+ split) before
+the 701 rows are regenerated.
+
+---
+
 ## 2026-09-20 — qwen7b complete at 2,331 rows, and `cm` settled out of band
 
 All four buckets reached target in one sitting: `te` 382 → 400, `cm` 67 → 701,
