@@ -545,6 +545,31 @@ def test_emoji_gate_fails_one_emoji_row_in_cm() -> None:
     assert unchecked.emoji_rows is None and generate.gate_reasons(unchecked) == []
 
 
+def test_gate_judges_the_text_cleaning_will_keep_not_the_chatter() -> None:
+    # gemma's 2026-09-22 cm probe: 2 of 24 rows failed the emoji check on an emoji
+    # that sat inside "Let me know if you'd like me to continue! 😊". Part 13 strips
+    # that line before any drop rule, so the gate has to judge the same text.
+    prompts = _cm_codemix_prompts(24)
+    human = {p["id"]: p["text"] for p in prompts}
+    postamble = "\n\nLet me know if you'd like me to continue the conversation! \U0001F60A"
+    def rows(text, n_words):
+        return [{"id": p["id"], "language": "cm", "text": text, "length_words": n_words,
+                 "human_length_words": 15, "truncated": False} for p in prompts]
+    # Same passage, once bare and once with chatter: both pass, and identically.
+    bare = generate.gate_stats("cm", rows(HINGLISH_MACHINE, 15), human_texts=human, check_emoji=True)
+    with_chatter = generate.gate_stats("cm", rows(HINGLISH_MACHINE + postamble, 24),
+                                       human_texts=human, check_emoji=True)
+    assert with_chatter.emoji_rows == 0 and generate.gate_reasons(with_chatter) == []
+    # Length is recounted after stripping, so the chatter cannot inflate the ratio
+    # (24 raw words against 15 human words would read 1.60 and fail).
+    assert abs(with_chatter.ratio - bare.ratio) < 0.001, (with_chatter.ratio, bare.ratio)
+    assert abs(with_chatter.codemix - bare.codemix) < 0.001
+    # An emoji in the passage itself still fails: qwen7b's 3 rows are this shape.
+    in_body = generate.gate_stats("cm", rows("arre \U0001F602 " + HINGLISH_MACHINE, 16),
+                                  human_texts=human, check_emoji=True)
+    assert in_body.emoji_rows == 24 and generate.gate_reasons(in_body)[0].startswith("emoji")
+
+
 def test_run_with_gates_aborts_cm_on_emoji_and_the_check_keys_on_the_bucket_list() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp) / "qwen7b.jsonl"

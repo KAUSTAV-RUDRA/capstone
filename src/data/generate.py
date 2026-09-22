@@ -89,6 +89,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
+from src.data.clean_artifacts import strip_boilerplate
 from src.data.schema import LABEL_MACHINE, LANGUAGE_BUCKETS
 from src.features.language_id import romanised_hindi_share
 from src.utils.config import load_config
@@ -832,18 +833,29 @@ def gate_stats(bucket: str, rows: Sequence[dict[str, Any]],
     the whole bucket's human share would mix a sample with a population.
 
     With ``check_emoji``, also the number of rows containing an emoji.
+
+    **Every check reads the text after :func:`strip_boilerplate`**, including the
+    length one, which recounts the words rather than trusting ``length_words``.
+    Part 13 drops rows only after stripping, so a gate that judged raw text would
+    abort a run over chatter that cleaning removes — which is exactly what gemma's
+    cm probe did, failing on 2 emoji that were both inside "Let me know if you'd
+    like me to continue! 😊" (decisions.md 2026-09-22). The stored row keeps the
+    raw text; only the checks see the stripped version. Rows without ``text`` fall
+    back to ``length_words``, so callers with bare rows are unaffected.
     """
+    judged = [(row, strip_boilerplate(row.get("text") or "")) for row in rows]
     ratios: list[float] = []
-    for row in rows:
+    for row, text in judged:
         human = float(row.get("human_length_words") or 0)
         if human > 0:
-            ratios.append(float(row.get("length_words") or 0) / human)
+            machine = float(len(text.split())) if text else float(row.get("length_words") or 0)
+            ratios.append(machine / human)
     if not ratios:
         return GateStats(bucket, 0)
     ratios.sort()
     codemix = human_codemix = None
     if human_texts:
-        paired = [(row.get("text") or "", human_texts[row["id"]]) for row in rows
+        paired = [(text, human_texts[row["id"]]) for row, text in judged
                   if row.get("id") in human_texts]
         if paired:
             codemix = _percentile(sorted(romanised_hindi_share(m) for m, _ in paired), 0.5)
@@ -858,7 +870,7 @@ def gate_stats(bucket: str, rows: Sequence[dict[str, Any]],
         over_pct=100.0 * sum(1 for r in ratios if r > ratio_max) / len(ratios),
         codemix=codemix,
         human_codemix=human_codemix,
-        emoji_rows=sum(has_emoji(row.get("text") or "") for row in rows) if check_emoji else None,
+        emoji_rows=sum(has_emoji(text) for _, text in judged) if check_emoji else None,
     )
 
 

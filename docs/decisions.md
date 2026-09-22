@@ -946,6 +946,44 @@ generator, since gemma and mistral will produce their own.
 
 ---
 
+## 2026-09-22 (later) — the gate judges the text cleaning will keep, not raw output
+
+**What happened.** gemma's first `cm` gate probe failed: emoji in 2 of 24 rows.
+Everything else was healthy — length median 0.97 (0–40 1.05, 40+ 0.92), Hindi share
+0.29 against a human 0.33, 0 % at the cap, zero instruction echo, zero Devanagari.
+Both emoji were inside a **trailing line of assistant chatter**: "Let me know if
+you'd like me to continue the conversation! 😊". Neither was in the passage.
+
+**The inconsistency this exposed.** The Part 13 spec written the same day says drop
+rules run *after* stage-1 stripping, so a row whose only emoji sits in boilerplate
+survives cleaning. The gate was applying a drop rule to raw output. The two orders
+disagreed, and the gate's order is the one that aborts a 110-minute run.
+
+| Decision | Value | Why |
+|---|---|---|
+| `strip_boilerplate()` lives in `src/data/clean_artifacts.py` | Imported by `generate.gate_stats` | One rule, one place. Cleaning owns it; the gate borrows it, so the gate cannot drift from what Part 13 will actually keep. |
+| The gate strips before **every** check | Length (words recounted, not read from `length_words`), code-mix, emoji | A postamble inflates all three. Counting `length_words` would let chatter push a passage over the ratio ceiling. |
+| The stored row keeps the **raw** text | Only the checks see the stripped version | Cleaning is Part 13's job and is measured there. The corpus keeps what the model produced, so the strip rule can change later without regenerating anything. |
+| The rule matches a **whole final line**, up to 3 of them | `_BOILERPLATE_LINE` in `clean_artifacts.py` | Both anchors are load-bearing. In the same 24 rows, two passages use the same words *in character* — "You know kya film dekhne ka mood hai? Let me know!" — and a substring rule eats text the prompt asked for. The 3-line cap stops a pathological row from being stripped to nothing. |
+
+**Evidence.** The stripper changes 3 of gemma's 24 probe rows, all of them the
+offer-to-continue line; the probe then passes at length 0.96, Hindi 0.29 vs 0.33,
+0 emoji. Across qwen7b's whole 2,331-row corpus it changes **1 row** — an `en`
+passage ending "Would you like to delve deeper into a specific aspect…". qwen7b's
+3 `cm` emoji rows are in-body (3 %, 11 % and 98 % through the text), so they still
+fail, and the bucket's full gate figures are unchanged: 1.13 length, 0.35 vs 0.32
+Hindi, 3 emoji.
+
+**Recorded for the remaining generators.** Closing packaging is a per-model habit,
+not a bucket property: gemma emits it in ~12 % of `cm` passages, qwen7b in 1 row
+in 2,331. mistral, llama and phi each need their own measurement rather than an
+assumption, and the same rule is what Part 13 will apply to all of them.
+
+**Unchanged:** the emoji rule is still zero-tolerance *on the passage*. Stripping
+decides what counts as the passage; it does not raise the limit.
+
+---
+
 ## Decisions still open (fill as resolved)
 
 - [ ] Phase 0.1 — what "patent" means (disclosure / IPR-cell / IPO provisional).

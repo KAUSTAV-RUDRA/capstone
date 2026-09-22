@@ -8,9 +8,14 @@ Serves docs/master-execution-plan.md Phase 2 §2.1.4.
 
 Two stages, in this order
 -------------------------
-1. **Strip** (:func:`clean_text`): a text-level transform, as above.
+1. **Strip** (:func:`clean_text`, which includes :func:`strip_boilerplate` for
+   trailing assistant chatter): a text-level transform, as above.
 2. **Drop**: four row-level rules below. They run on the *stripped* text, so a
    preamble that stage 1 removes cannot cause a drop.
+
+The generation gate (:func:`src.data.generate.gate_stats`) imports
+:func:`strip_boilerplate` and applies it before every check, for the same reason:
+judging raw text would fail rows that stage 1 saves (decisions.md 2026-09-22).
 
 The drop rules apply to **every generator and every bucket** — qwen7b, gemma,
 mistral, llama, phi — not only to the generator they were calibrated on. Each
@@ -77,7 +82,53 @@ decided here.
 """
 from __future__ import annotations
 
+import re
+
 from src.data.schema import Sample
+
+#: Trailing assistant chatter: an offer to continue, or a "hope this helps" sign-off,
+#: as a WHOLE final line. gemma ends about 3 in 24 cm passages this way ("Let me know
+#: if you'd like me to continue the conversation! 😊"), qwen7b none in 701.
+#:
+#: Each pattern must match the entire line, and that line must be the last one. Both
+#: anchors are load-bearing. In the same 24-row probe, two rows end with the same
+#: words *inside* the passage — "You know kya film dekhne ka mood hai? Let me know!"
+#: — and a substring rule would eat text the model was asked to write. A trailing
+#: emoji, or any sign-off punctuation, is part of the line and goes with it.
+_BOILERPLATE_LINE: tuple[re.Pattern[str], ...] = (
+    re.compile(r"let me know if you(?:'d| would)? (?:like|want).*", re.I),
+    re.compile(r"(?:i )?hope (?:this|that|it) (?:helps|was helpful).*", re.I),
+    re.compile(r"feel free to (?:ask|let me know|share|reach out).*", re.I),
+    re.compile(r"would you like (?:me )?to .*", re.I),
+    re.compile(r"do you want (?:me )?to .*", re.I),
+    re.compile(r"i can (?:also )?(?:continue|write|add|expand|provide) .*if you.*", re.I),
+)
+
+#: How many trailing chatter lines to take off one passage. More than one happens
+#: ("...continue? / Let me know!"); an unbounded loop on a pathological row could
+#: strip the passage itself.
+_MAX_BOILERPLATE_LINES = 3
+
+
+def strip_boilerplate(text: str) -> str:
+    """Drop trailing assistant chatter ("Let me know if you'd like me to continue! 😊").
+
+    Only a **final line** that matches one of :data:`_BOILERPLATE_LINE` in full is
+    removed, up to :data:`_MAX_BOILERPLATE_LINES` times. This is generation
+    packaging rather than text the prompt asked for, and it carries surface cues —
+    emoji, English sign-offs — that would otherwise separate the classes for
+    reasons unrelated to authorship.
+
+    Shared with the generation gate, which must judge what cleaning will keep.
+    """
+    lines = text.rstrip().split("\n")
+    for _ in range(_MAX_BOILERPLATE_LINES):
+        while lines and not lines[-1].strip():
+            lines.pop()
+        if not lines or not any(p.fullmatch(lines[-1].strip()) for p in _BOILERPLATE_LINE):
+            break
+        lines.pop()
+    return "\n".join(lines).rstrip()
 
 
 def clean_text(text: str) -> tuple[str, float]:
