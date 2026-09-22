@@ -451,13 +451,17 @@ def _cm_codemix_prompts(n: int = 60) -> list[dict]:
              "text": HINGLISH_HUMAN} for i in range(n)]
 
 
-def _text_phase(out: Path, done: set[str], seen: list[int], text: str):
-    """A run_phase writing ``text`` at exactly human length: in band on length, always."""
+def _text_phase(out: Path, done: set[str], seen: list[int], text: str, emoji_rows: int = 0):
+    """A run_phase writing ``text`` at exactly human length: in band on length, always.
+
+    The first ``emoji_rows`` rows of each phase end in an emoji.
+    """
     def run_phase(items, label="passages"):
         seen.append(len(items))
         with open(out, "a", encoding="utf-8") as fh:
-            for item in items:
-                fh.write(json.dumps({"id": item["id"], "language": item["bucket"], "text": text,
+            for n, item in enumerate(items):
+                row_text = text + (" \U0001F602" if n < emoji_rows else "")
+                fh.write(json.dumps({"id": item["id"], "language": item["bucket"], "text": row_text,
                                      "length_words": item["human_length_words"],
                                      "human_length_words": item["human_length_words"],
                                      "truncated": False}) + "\n")
@@ -514,6 +518,55 @@ def test_codemix_check_applies_only_to_listed_buckets() -> None:
             assert seen == [24, 60], (buckets, seen)    # probe, then the bulk run
     cfg = load_config(DATA_CONFIG)["machine_corpus"]["gate"]
     assert cfg["codemix_buckets"] == ["cm"] and abs(cfg["codemix_min_ratio"] - 2 / 3) < 0.001
+
+
+def test_has_emoji_catches_pictographs_but_not_devanagari_joiners() -> None:
+    for text in ("mast tha \U0001F602", "exam done ✅", "love it ❤️", "⭐ topper",
+                 "family \U0001F468‍\U0001F469‍\U0001F467"):
+        assert generate.has_emoji(text), text
+    # U+200D joins Devanagari conjuncts: 118 of 2,200 human hi passages carry one.
+    for text in (HINGLISH_MACHINE, "क्‍ष है", "marks: 95/100, rank #3!", ""):
+        assert not generate.has_emoji(text), text
+
+
+def test_emoji_gate_fails_one_emoji_row_in_cm() -> None:
+    # Human cm has emoji in 0 of 2,200 rows, so one row in the probe is enough to fail.
+    prompts = _cm_codemix_prompts(24)
+    human = {p["id"]: p["text"] for p in prompts}
+    rows = [{"id": p["id"], "language": "cm", "length_words": 15, "human_length_words": 15,
+             "truncated": False, "text": HINGLISH_MACHINE + (" \U0001F602" if i == 0 else "")}
+            for i, p in enumerate(prompts)]
+    stats = generate.gate_stats("cm", rows, human_texts=human, check_emoji=True)
+    reasons = generate.gate_reasons(stats)
+    assert stats.emoji_rows == 1 and len(reasons) == 1 and reasons[0].startswith("emoji"), reasons
+    assert "1 with emoji" in stats.describe()
+    # Not measured unless asked: the same rows pass on length and code-mix alone.
+    unchecked = generate.gate_stats("cm", rows, human_texts=human)
+    assert unchecked.emoji_rows is None and generate.gate_reasons(unchecked) == []
+
+
+def test_run_with_gates_aborts_cm_on_emoji_and_the_check_keys_on_the_bucket_list() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "qwen7b.jsonl"
+        done: set[str] = set()
+        seen: list[int] = []
+        try:
+            generate.run_with_gates(["cm"], _cm_codemix_prompts(), done_ids=done, out_path=out,
+                                    run_phase=_text_phase(out, done, seen, HINGLISH_MACHINE, emoji_rows=1))
+        except SystemExit as exc:
+            assert "emoji" in str(exc) and "code-mix" not in str(exc), exc
+        else:
+            raise AssertionError("one emoji row in the cm probe must abort the run")
+        assert seen == [24], seen          # the probe ran; the other 36 never did
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "qwen7b.jsonl"
+        done = set()
+        seen = []
+        generate.run_with_gates(["cm"], _cm_codemix_prompts(), done_ids=done, out_path=out,
+                                run_phase=_text_phase(out, done, seen, HINGLISH_MACHINE, emoji_rows=1),
+                                emoji_buckets=())
+        assert seen == [24, 60], seen      # not emoji checked: probe, then the bulk run
+    assert load_config(DATA_CONFIG)["machine_corpus"]["gate"]["emoji_buckets"] == ["cm"]
 
 
 def test_a_bucket_whose_rows_are_bad_keeps_failing_on_resume() -> None:

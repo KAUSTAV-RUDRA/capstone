@@ -62,6 +62,8 @@ Length gate
     ratio must sit inside 0.75-1.25 and at most 20 % of rows may have hit the
     token cap, or the run aborts. A prompt regime that does not transfer between
     buckets is therefore worth 24 rows, not a corpus (:func:`run_with_gates`).
+    cm is also held to its human passages' romanised-Hindi share and to zero
+    emoji rows.
 
 Output is ``data/raw/machine/<generator>.jsonl``, one row per assigned human
 passage, carrying ``prompt_id`` back to it. Ids already present are skipped, so
@@ -750,6 +752,27 @@ GATE_MAX_CAP_PCT = 20.0
 GATE_CODEMIX_BUCKETS: tuple[str, ...] = ("cm",)
 GATE_CODEMIX_MIN_RATIO = 2 / 3
 
+#: Emoji check (2026-09-22). For these buckets a single probe row containing an
+#: emoji fails the gate. The human cm bucket has emoji in 0 of 2,200 rows, so one
+#: in a machine row is a class shortcut rather than style. The template says "No
+#: emoji" and that is not enough on its own: two of the three probed variants
+#: still put one in (docs/progress.md 2026-09-21), and 28 of the 701 stale cm
+#: rows carry one.
+GATE_EMOJI_BUCKETS: tuple[str, ...] = ("cm",)
+
+#: Pictographs, dingbats, misc symbols/arrows, the watch/hourglass/media glyphs
+#: and the emoji presentation selector. A lone ZWJ (U+200D) is deliberately
+#: absent: it joins Devanagari conjuncts, and counting it scored 118 of the 2,200
+#: human hi passages as emoji. Inside an emoji sequence the pictographs match
+#: anyway.
+_EMOJI_RE = re.compile("[\U0001F000-\U0001FAFF☀-➿⬀-⯿"
+                       "⌚⌛⏩-⏺️]")
+
+
+def has_emoji(text: str) -> bool:
+    """True if ``text`` contains an emoji (see :data:`_EMOJI_RE` for what counts)."""
+    return bool(_EMOJI_RE.search(text))
+
 
 def _percentile(values: Sequence[float], q: float) -> float:
     """Linear-interpolated percentile of an already-sorted sequence."""
@@ -784,24 +807,31 @@ class GateStats:
     #: None when the bucket is not code-mix checked or no human text was paired.
     codemix: float | None = None
     human_codemix: float | None = None
+    #: Rows containing an emoji; None when the bucket is not emoji checked.
+    emoji_rows: int | None = None
 
     def describe(self) -> str:
         text = (f"{self.bucket}: {self.n} rows, machine/human length median {self.ratio:.2f} "
                 f"(mean {self.mean:.2f}, p90 {self.p90:.2f}), {self.cap_pct:.0f} % at the token cap")
         if self.codemix is not None:
             text += f", Hindi share {self.codemix:.2f} vs human {self.human_codemix:.2f}"
+        if self.emoji_rows is not None:
+            text += f", {self.emoji_rows} with emoji"
         return text
 
 
 def gate_stats(bucket: str, rows: Sequence[dict[str, Any]],
                ratio_max: float = GATE_RATIO_RANGE[1],
-               human_texts: dict[str, str] | None = None) -> GateStats:
+               human_texts: dict[str, str] | None = None,
+               check_emoji: bool = False) -> GateStats:
     """Length statistics for ``rows``, which must already be one bucket's rows.
 
     With ``human_texts`` (row id -> the human passage it was prompted from), also
     the median romanised-Hindi share of the rows and of those same passages. The
     comparison is paired on purpose: the probe is 24 rows, so measuring it against
     the whole bucket's human share would mix a sample with a population.
+
+    With ``check_emoji``, also the number of rows containing an emoji.
     """
     ratios: list[float] = []
     for row in rows:
@@ -828,6 +858,7 @@ def gate_stats(bucket: str, rows: Sequence[dict[str, Any]],
         over_pct=100.0 * sum(1 for r in ratios if r > ratio_max) / len(ratios),
         codemix=codemix,
         human_codemix=human_codemix,
+        emoji_rows=sum(has_emoji(row.get("text") or "") for row in rows) if check_emoji else None,
     )
 
 
@@ -839,7 +870,8 @@ def gate_reasons(stats: GateStats, ratio_range: tuple[float, float] = GATE_RATIO
     Both bounds are tested. Failing only below ``ratio_range[0]`` is what let the
     cm run reach 470 rows: the watcher saw 1.72 and passed it. The code-mix check
     runs only when :func:`gate_stats` measured it and the human passages carry
-    any Hindi at all — a zero human share gives nothing to be a fraction of.
+    any Hindi at all — a zero human share gives nothing to be a fraction of. The
+    emoji check, likewise only when measured, allows none.
     """
     low, high = ratio_range
     reasons: list[str] = []
@@ -859,6 +891,9 @@ def gate_reasons(stats: GateStats, ratio_range: tuple[float, float] = GATE_RATIO
             reasons.append(f"code-mix: romanised-Hindi share median {stats.codemix:.2f} against "
                            f"{stats.human_codemix:.2f} for the same passages' human text, minimum "
                            f"{floor:.2f} ({codemix_min_ratio:.2f} of human) — the rows are not Hinglish")
+    if stats.emoji_rows:
+        reasons.append(f"emoji: {stats.emoji_rows} of {stats.n} rows contain emoji, limit 0 — the "
+                       f"human '{stats.bucket}' passages carry none, so any is a class shortcut")
     return reasons
 
 
@@ -941,7 +976,8 @@ def run_with_gates(buckets: Sequence[str], prompts: Sequence[dict[str, Any]], *,
                    ratio_range: tuple[float, float] = GATE_RATIO_RANGE,
                    max_cap_pct: float = GATE_MAX_CAP_PCT,
                    codemix_buckets: Sequence[str] = GATE_CODEMIX_BUCKETS,
-                   codemix_min_ratio: float = GATE_CODEMIX_MIN_RATIO) -> RunReport:
+                   codemix_min_ratio: float = GATE_CODEMIX_MIN_RATIO,
+                   emoji_buckets: Sequence[str] = GATE_EMOJI_BUCKETS) -> RunReport:
     """Probe each bucket, gate it, then generate the rest. Aborts if a gate fails.
 
     Every bucket is taken to ``probe_rows`` rows and judged before the next one
@@ -957,6 +993,7 @@ def run_with_gates(buckets: Sequence[str], prompts: Sequence[dict[str, Any]], *,
     Buckets in ``codemix_buckets`` must also keep at least ``codemix_min_ratio``
     of their own human passages' romanised-Hindi share: length alone passed cm
     rows that were English in all but name (docs/progress.md 2026-09-21).
+    Buckets in ``emoji_buckets`` fail on a single emoji row.
 
     The probe rows are ordinary corpus rows written to the same file, and the
     bulk phase receives the full prompt list with ``done_ids`` already updated,
@@ -985,7 +1022,7 @@ def run_with_gates(buckets: Sequence[str], prompts: Sequence[dict[str, Any]], *,
         human_texts = ({p["id"]: p["text"] for p in in_bucket if p.get("text")}
                        if bucket in codemix_buckets else None)
         stats = gate_stats(bucket, bucket_rows(out_path, bucket, probe_rows), ratio_range[1],
-                           human_texts)
+                           human_texts, check_emoji=bucket in emoji_buckets)
         if stats.n == 0:
             log.warning("bucket %s: no rows to judge (every probe request failed) — "
                         "not starting the bulk run", bucket)
@@ -1166,7 +1203,8 @@ def main(argv: list[str] | None = None) -> None:
                      float(gate_cfg.get("ratio_max", GATE_RATIO_RANGE[1]))),
         max_cap_pct=float(gate_cfg.get("max_cap_pct", GATE_MAX_CAP_PCT)),
         codemix_buckets=tuple(gate_cfg.get("codemix_buckets", GATE_CODEMIX_BUCKETS)),
-        codemix_min_ratio=float(gate_cfg.get("codemix_min_ratio", GATE_CODEMIX_MIN_RATIO)))
+        codemix_min_ratio=float(gate_cfg.get("codemix_min_ratio", GATE_CODEMIX_MIN_RATIO)),
+        emoji_buckets=tuple(gate_cfg.get("emoji_buckets", GATE_EMOJI_BUCKETS)))
 
     resume = f"python -m src.data.generate --generator {args.generator} --buckets {args.buckets}"
     if args.fraction != 1.0:
