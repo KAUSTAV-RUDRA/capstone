@@ -5,6 +5,114 @@ Newest entries at the top.
 
 ---
 
+## 2026-09-22 — cm regenerated under the long-ask template; the gate gains an emoji check
+
+Step 4 of the cm plan. The emoji check is committed (`e17674e`). v0's 701 rows are
+moved aside, not deleted. qwen7b cm is regenerated at 701/701. On the finished
+bucket, length and code-mix now pass, and the **emoji check fails on 3 of 701 rows**.
+Those 3 rows are an open decision (below).
+
+### 1. Emoji check in the gate (`e17674e`)
+
+Human cm has emoji in **0 of 2,200** rows, so one emoji in a machine cm row is
+a class shortcut. The template's "No emoji" does not guarantee none: two of the three
+2026-09-21 probe variants still put one in, and 28 of v0's 701 rows carry one. For
+`gate.emoji_buckets` (`[cm]`), a single probe row with an emoji fails the gate.
+`generate.has_emoji()` uses the probe scripts' ranges plus ⌚⌛⏩–⏺, and **drops
+the lone ZWJ**. ZWJ joins Devanagari conjuncts, and counting it scored 118 of the
+2,200 human hi passages as emoji. Under the new ranges human cm stays at 0/2,200,
+and en/hi/te read 2/2,200 each.
+
+### 2. v0 moved to `data/raw/discarded/`
+
+All 701 v0 cm rows are in `data/raw/discarded/qwen7b_cm_v0.jsonl`. They were moved
+as raw bytes, not re-serialised. `data/raw/machine/qwen7b.jsonl` then held
+**1,630 rows** (en 730, hi 500, te 400), and those lines are byte-identical to
+before (sha256 checked). The two files' sizes add up to the original's exactly.
+`data/` is gitignored, so the discard file exists only on this machine.
+
+### 3. Regeneration
+
+`python -m src.data.generate --generator qwen7b --buckets cm --max-minutes 30`,
+with the Ollama app started first (it was not running; `OLLAMA_NUM_PARALLEL:4` in
+server.log). **701/701 in 23.2 min**, 81,643 tokens, 58.7 tok/s, concurrency
+x2.8–3.8. The run hit no errors and needed no retries. cm covers the same 701
+prompt_ids as v0. The file is back to 2,331 rows, with zero duplicate `id` or
+`prompt_id`.
+
+**Gate on the 24-row stratified probe: PASS.** Length median 1.19 (mean 1.18, p90
+1.61), 0 % at the cap, Hindi share 0.33 against 0.29, 0 emoji. Inside the probe,
+0–40 read **1.22** (n = 14) and 40+ read 1.06 (n = 10).
+
+**Settled, all 701 rows.** Hindi share is the gate's median romanised-Hindi share,
+with the paired human value in brackets.
+
+| human length | n | v0 median | **v1 median** | v1 in band | v1 > 1.25 | Hindi share | emoji | at cap |
+|---|---|---|---|---|---|---|---|---|
+| 0–40 | 413 | 1.75 | **1.18** | 229 (55 %) | 159 | 0.33 (0.32) | 1 | 0 |
+| 40–100 | 152 | 1.05 | **1.07** | 111 (73 %) | — | 0.35 (0.30) | 0 | 1 |
+| 100+ | 136 | 1.06 | **1.11** | 85 (62 %) | — | 0.37 (0.30) | 2 | 12 |
+| 40+ | 288 | 1.05 | **1.09** | 196 (68 %) | 79 | 0.36 (0.30) | 2 | 13 |
+| **all** | 701 | 1.39 | **1.13** | 425 (61 %) | 238 | 0.35 (0.32) | 3 | 13 |
+
+By n_words bin: 25 → 1.18 (408), 50 → 1.03 (101), 100 → 1.09 (108), 150 → 1.13 (56),
+200 → 1.19 (14), **250 → 1.70 (11), 300 → 1.93 (3)**.
+
+**The short bin: 1.22 on the probe, 1.18 settled, against a ceiling of 1.25.** It
+held, with 0.07 of headroom on the settled median. The probe-to-settled gap (0.04)
+is within the ±0.06 run-to-run noise measured 2026-09-21. The median hides
+dispersion: 159 of 413 short rows (38 %) sit above 1.25, and only 25 below 0.75
+(p25 1.00, p75 1.38, p90 1.63). The short bin still leans long; it no longer sits
+out of band.
+
+### 4. The gate re-run on the finished bucket (the check v0 failed)
+
+Same `gate_stats` / `gate_reasons` code and thresholds as the run, applied to all 701
+rows with each row paired to its own human passage:
+
+| | length median | cap | Hindi share | emoji | verdict |
+|---|---|---|---|---|---|
+| v0 (discarded) | 1.39 ✗ (62 % of rows > 1.25) | 0 % | 0.03 vs 0.32 ✗ | 28 ✗ | FAIL ×3 |
+| **v1** | **1.13** ✓ (34 % > 1.25) | 2 % ✓ | **0.35 vs 0.32** ✓ | **3** ✗ | **FAIL (emoji only)** |
+
+The 3 emoji rows: `cmu_hinglish_dog_train:187-216` (😂), `…:6898-6903` (🌍), and
+`comi_lingua_TN:train:743` (😂😉, which also echoes "roman script"). At 3/701 the
+24-row probe had about a 10 % chance of catching one, so passing there was the
+expected outcome, not a gate defect. With a zero limit, the check fails on any
+nonzero rate once it is applied to a whole bucket.
+
+### Row-level defects in v1, for Part 13 (`clean_artifacts.py` is still a stub)
+
+- **Truncated: 13 rows**, all from passages of 100+ words, 8 of them in the 250/300
+  bins. Those bins over-produce (1.70 / 1.93, n = 14): at 200+ words the long-ask
+  inflation (human / 0.75) overshoots. It was probed on 10 long rows with human
+  length at most 170. This is 4 % of the bucket and does not move the medians.
+- **Instruction echo: ~23 rows (3.3 %)**, mostly "roman script mein likha hai". The
+  regex `\broman\b|hinglish|\bemoji` hits 25 v1 rows, 7 v0 rows and 3 of 2,200
+  human rows. All but 1–2 of the v1 hits are real echo ("roman numeral watch" is
+  not). The probe saw 0 of 24, and the long-ask probe saw 1 of 24. This is a
+  detector shortcut, as flagged 2026-09-21.
+- **Stray script: 13 rows with Devanagari**, against 9 of 2,200 human rows. Most are
+  single Devanagari characters inside Roman words ("banayा", "samjhा"). A few also
+  carry Cyrillic or Hangul fragments ("sitацию", "Jayeग즈。"). Two are substantially
+  Devanagari (228/458 and 92/133 characters).
+- Zero-Hindi rows: 5 (v0: 134).
+
+### Open: what to do with the 3 emoji rows
+
+Choices: (a) drop them in Part 13, with the truncated and echo rows; (b) regenerate
+those 3 ids (parallel decoding is not seed-deterministic, so they would probably
+come back different); (c) strip the emoji and keep the text. **Not yet decided,
+nothing has been changed.** decisions.md does not yet record the cm template
+adoption, the long-ask rule, or the emoji check. The 2026-09-21 plan had that as
+part of step 4.
+
+**Verify:** `PYTHONPATH=. venv\Scripts\python.exe tests\data\test_generate.py` → 34
+PASS. Row counts: en 730 / hi 500 / te 400 / cm 701 in `data/raw/machine/qwen7b.jsonl`,
+701 cm in `data/raw/discarded/qwen7b_cm_v0.jsonl`.
+
+---
+
 ## 2026-09-21 (late) — cm: code-mix gate built, long-ask template adopted; rows not yet regenerated
 
 Steps 1–3 of the cm plan. Step 4 (record in decisions.md, delete qwen7b's 701 cm
