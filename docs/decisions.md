@@ -885,6 +885,67 @@ nothing has been discarded.
 
 ---
 
+## 2026-09-22 — the cm regime, its two new gate checks, and v0 → v1
+
+What the 2026-09-21 and 2026-09-22 sittings settled. The code landed in `61fe922`
+(template + ask rule), `a796da6` (code-mix check) and `e17674e` (emoji check); this
+is the decision record those commits were missing.
+
+### The `cm` prompt regime
+
+| Decision | Value | Why |
+|---|---|---|
+| `cm` template | `PROMPT_TEMPLATES["cm"]`: "about N words … in Hinglish: mix Hindi and English words within every sentence, with the Hindi written in Roman script, casual, like students texting each other, as S or more full sentences. No emoji. Continue naturally and do not stop early." | The template it replaced wrote English in all but name: romanised-Hindi share 0.02–0.04 against a human 0.30–0.33. Probed 3 variants × 24 stratified passages; this one (v1) was the only one with zero emoji rows and a length median in band. |
+| `cm` ask comes from the human length, not the bin | `ASK_FROM_HUMAN` / `budget.ask_from_human: {cm: {long_from_words: 40, long_ratio: 0.75}}` | 59 % of `cm` sits in the 0–40 bin, where the bin value 25 is already 1.25× a 20-word passage before the model writes a word. One ask ratio does not fit both ends: at ask = human, 0–40 read 1.13 and 40+ read 0.73, so only passages of 40+ words are inflated (ask = human / 0.75). |
+| `compliance_ratio` is not applied to `cm` | `cm: 1.0` | The ask rule already sets the target. Applying both would double-count, the same error the te 0.62 note warns about. |
+| Sentence clause for `cm` | `max(2, n_words // 15)`, following the ask | A floor of 8 sentences implies ~88 words whatever the word clause says, and silently overrides it. |
+
+**Every figure above is measured on `cm`'s own probe.** No bucket's behaviour
+transfers to another by analogy (2026-09-18, still holds).
+
+### Two new gate checks, both `cm`-only by config
+
+| Check | Rule | Why |
+|---|---|---|
+| Code-mix (`a796da6`) | For `gate.codemix_buckets` (`[cm]`), the probe rows' median romanised-Hindi function-word share must be ≥ `codemix_min_ratio` (2/3) of the median for **the same passages'** human text | Length alone passed 701 rows that were English in all but name. Paired, because a 24-row probe against a whole bucket's human share mixes a sample with a population. Function words, not content words: Hindi grammar has to be running through the text. yaar/yar/bhai are excluded — they are the cheapest way to look Hinglish without being it. |
+| Emoji (`e17674e`) | For `gate.emoji_buckets` (`[cm]`), **any** probe row containing an emoji fails | Human `cm` has emoji in 0 of 2,200 rows, so one in a machine row is a class shortcut, not style. "No emoji" in the prompt is not enough: 2 of the 3 probed variants still produced one. |
+
+**The emoji regex excludes the lone ZWJ (U+200D)**, which the probe scripts
+counted. ZWJ joins Devanagari conjuncts: counting it scored 118 of the 2,200 human
+`hi` passages as emoji. Inside a real emoji sequence the pictographs match anyway.
+
+### v0 → v1
+
+The 701 v0 `cm` rows were **moved to `data/raw/discarded/qwen7b_cm_v0.jsonl`, not
+deleted** (`data/` is gitignored, so that file is local to this machine). This
+supersedes the 2026-09-20 line "nothing has been discarded". v1 regenerated the
+same 701 prompt_ids in 23.2 min.
+
+| | overall | 0–40 | 40–100 | 100+ | Hindi share (human) | emoji |
+|---|---|---|---|---|---|---|
+| v0 | 1.39 | 1.75 | 1.05 | 1.06 | 0.03 (0.32) | 28 |
+| **v1** | **1.13** | **1.18** | 1.07 | 1.11 | **0.35** (0.32) | 3 |
+
+**The gate re-run on the whole finished bucket** — the check v0 never got, since a
+24-row probe judged it and the bucket then settled elsewhere — gives v0 FAIL on all
+three checks and **v1 FAIL on emoji alone, 3 of 701**. At 3/701 a 24-row probe has
+about a 10 % chance of catching one, so the probe passing was arithmetic, not a
+gate defect. A zero limit fails any nonzero rate once a whole bucket is judged.
+
+**Decided: the residue is a cleaning problem, not a template problem.** v1's 3
+emoji rows, ~23 instruction-echo rows and 13 truncated rows are row-level defects
+in a regime whose length and code-mix both pass. They are dropped in Part 13
+rather than fixed by another template round or another regeneration. The rules are
+specified in `src/data/clean_artifacts.py`'s docstring and apply to every
+generator, since gemma and mistral will produce their own.
+
+**Not decided:** whether the long-ask rule needs a third band above 200 words. The
+250 and 300 bins over-produce (1.70 / 1.93) with 8 of their 14 rows truncated;
+`long_ratio: 0.75` was probed on 10 long rows whose human length reached 170. It is
+4 % of `cm` and does not move the bucket median, so it is recorded and left alone.
+
+---
+
 ## Decisions still open (fill as resolved)
 
 - [ ] Phase 0.1 — what "patent" means (disclosure / IPR-cell / IPO provisional).
