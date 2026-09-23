@@ -188,6 +188,94 @@ def test_compensated_words_inflates_the_ask_but_never_past_the_cap() -> None:
     assert generate.compensated_words(150, 1.339, 2.0, cap=3600) == 150
 
 
+def test_compliance_ratio_is_per_generator_and_falls_back_per_bucket() -> None:
+    flat = {"en": 1.0, "hi": 0.55, "te": 0.62, "cm": 1.0}
+    by_generator = {"gemma": {"hi": 1.0}}
+    # The generator that was measured gets its own value...
+    assert generate.compliance_for("gemma", "hi", flat, by_generator) == 1.0
+    # ...but only for the bucket it names: te and en still take the shared default.
+    assert generate.compliance_for("gemma", "te", flat, by_generator) == 0.62
+    assert generate.compliance_for("gemma", "en", flat, by_generator) == 1.0
+    # A generator with no entry resolves exactly as before the key existed. This
+    # is what keeps qwen7b's frozen rows reproducible (2026-09-23).
+    for bucket, expected in flat.items():
+        assert generate.compliance_for("qwen7b", bucket, flat, {}) == expected
+        assert generate.compliance_for("qwen7b", bucket, flat, by_generator) == expected
+    # An unknown bucket is not compensated rather than raising.
+    assert generate.compliance_for("gemma", "fr", flat, by_generator) == 1.0
+
+
+def test_config_carries_gemmas_measured_ratios_and_leaves_qwen_alone() -> None:
+    budget = load_config(DATA_CONFIG)["machine_corpus"]["budget"]
+    shared = budget["compliance_ratio"]
+    overrides = budget["compliance_ratio_by_generator"]
+    assert shared == {"en": 1.0, "hi": 0.55, "te": 0.62, "cm": 1.0}
+    # Measured on gemma's own 12-passage probe, 2026-09-23. qwen's 0.55/0.62 are
+    # what gemma was wrongly given; these are what gemma actually does.
+    assert overrides["gemma"] == {"hi": 0.73, "te": 0.84}
+    # qwen7b must never appear: its rows are generated and frozen, and a ratio
+    # change would silently re-regime a corpus already on disk.
+    assert "qwen7b" not in overrides
+    for generator, buckets in overrides.items():
+        assert set(buckets) <= set(generate.LANGUAGE_BUCKETS), generator
+        assert all(0.25 <= float(v) <= 1.0 for v in buckets.values()), generator
+    # Resolution: gemma takes its own hi/te and the shared en/cm; qwen takes all four.
+    assert generate.compliance_for("gemma", "hi", shared, overrides) == 0.73
+    assert generate.compliance_for("gemma", "en", shared, overrides) == 1.0
+    assert generate.compliance_for("qwen7b", "hi", shared, overrides) == 0.55
+
+
+def test_selection_record_refuses_a_changed_cap_instead_of_reusing_it() -> None:
+    prompts = [{"id": f"hi-{i:04d}", "n_words": 100 + (i % 3) * 50} for i in range(600)]
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "gemma__hi.json"
+        first = generate.load_or_record_selection(path, prompts, 500, "hi", "gemma")
+        assert len(first) == 500 and json.loads(path.read_text())["limit"] == 500
+        # Same cap: reused verbatim, which is the whole point of freezing it.
+        assert generate.load_or_record_selection(path, prompts, 500, "hi", "gemma") == first
+        # Recut cap: refuses. Reusing would generate the old 500 while the config
+        # says 250, silently (2026-09-23).
+        try:
+            generate.load_or_record_selection(path, prompts, 250, "hi", "gemma")
+        except SystemExit as exc:
+            assert "SELECTION CAP CHANGED" in str(exc) and "frozen at limit 500" in str(exc)
+        else:
+            raise AssertionError("a changed cap must abort, not silently reuse the record")
+
+
+def test_config_caps_gemma_and_mistral_but_leaves_qwen_frozen() -> None:
+    mc = load_config(DATA_CONFIG)["machine_corpus"]
+    shared = mc["bucket_limits"]
+    per_generator = mc["bucket_limits_by_generator"]
+    assert shared == {"te": 400, "hi": 500}
+    assert per_generator["gemma"] == {"hi": 250, "te": 200}
+    assert per_generator["mistral"] == {"hi": 250, "te": 200}
+    # qwen7b's rows are already generated against 500/400; re-capping it would
+    # orphan rows that are on disk.
+    assert "qwen7b" not in per_generator
+    resolved = {**shared, **per_generator["gemma"]}
+    assert resolved == {"hi": 250, "te": 200}
+    assert {**shared, **per_generator.get("qwen7b", {})} == shared
+
+
+def test_heldout_generators_drop_en_and_seen_ones_do_not() -> None:
+    mc = load_config(DATA_CONFIG)["machine_corpus"]
+    drop = set(mc["heldout_drop_buckets"])
+    assert drop == {"en"}
+    generators = mc["generators"]
+    requested = ["en", "hi", "te", "cm"]
+    for alias in HELDOUT:
+        assert generators[alias]["role"] == "heldout"
+        kept = [b for b in requested if b not in drop]
+        assert kept == ["hi", "te", "cm"], alias
+    # A seen generator keeps every bucket: the drop is keyed on the role.
+    for alias in SEEN:
+        assert generators[alias]["role"] == "seen"
+        kept = [b for b in requested
+                if not (generators[alias]["role"] == "heldout" and b in drop)]
+        assert kept == requested, alias
+
+
 def test_load_fertility_prefers_the_generator_tokenizer_then_falls_back() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "fertility.csv"

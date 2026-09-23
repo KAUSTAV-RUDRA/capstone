@@ -984,6 +984,95 @@ decides what counts as the passage; it does not raise the limit.
 
 ---
 
+## 2026-09-23 — a compliance ratio belongs to a generator, not just a bucket
+
+**What happened.** gemma's `hi` gate aborted a 110-minute run after 24 rows:
+median machine/human length **1.48**, against a ceiling of 1.25, with 83 % of rows
+above it. `cm` (1.00) and `en` (0.80) had passed minutes earlier on rows already on
+disk.
+
+**The cause.** `compliance_ratio {en 1.0, hi 0.55, te 0.62, cm 1.0}` was measured on
+**qwen** and applied to **gemma** unchanged, because the key is the bucket alone. A
+compliance ratio is the fraction of the ask a model actually writes, so it is a
+property of the generator *and* the bucket. gemma writes longer on Indic and shorter
+on English than qwen (`en` 0.80 against qwen's 0.87), so hi's ×1.82 inflation — sized
+for a model that under-produces at 0.55 — was applied to one that does not.
+
+The arithmetic is exact. gemma's measured raw ratio on hi is 0.73, so under a 0.55
+ask it writes 0.73 × 1.82 = 1.33 bins ≈ **1.46 of human**. Observed: 1.48.
+
+decisions.md 2026-09-18 already required every regime to be measured on its own probe
+and never carried across by analogy. The rule was in the prose; the config could not
+express it, so it carried the value across silently. **The same trap is still armed
+for mistral, llama and phi.**
+
+### Measured — gemma's own raw ratios
+
+`src/data/probe_compliance.py`, new: 12 passages per bucket, current template,
+ask = the length bin with **no** compensation, `num_predict` at 3× headroom so
+over-production is measured rather than truncated (0 of 24 rows truncated). Words
+counted after `strip_boilerplate()`, the way the gate counts them.
+
+| bucket | machine/ask (median) | mean | p10 | p90 | qwen's value | was |
+|---|---|---|---|---|---|---|
+| hi | **0.73** | 0.74 | 0.60 | 0.87 | 0.55 | ×1.82 over-inflated |
+| te | **0.84** | 0.79 | 0.58 | 0.93 | 0.62 | ×1.35 over-inflated |
+
+Both are machine/**ask**, the convention every existing value uses. Mixing in a
+machine/human figure for one generator would be the same silent-config bug in a new
+form.
+
+**How the ask actually lands.** Output is regressed on ask across the 12 rows:
+
+| bucket | slope (words out per word of ask) | intercept | r | predicted gate median |
+|---|---|---|---|---|
+| hi | 0.65 | 14 | 0.86 | **1.05** (0.84–1.17) |
+| te | 0.36 | 69 | 0.73 | **0.89** (0.67–1.06) |
+
+hi responds near-proportionally, so compensation does what it assumes. **te is
+damped**: a large intercept and a shallow slope mean gemma writes ~69 words plus a
+third of whatever is asked, so long te passages under-produce however the ask is
+sized — 3 of 12 predicted rows fall below 0.75 even though the median passes. The
+gate tests the median, so te is expected to pass, but te's long tail is a corpus
+property to report, not something a ratio fixes.
+
+| Decision | Value | Why |
+|---|---|---|
+| `compliance_ratio_by_generator` | New key: generator → bucket → ratio | The flat `compliance_ratio` stays every generator's default, so a generator absent from it resolves exactly as before and qwen7b's frozen rows are untouched. Falls back per bucket, so overriding hi alone leaves en and cm shared. |
+| gemma's ratios | `{hi: 0.73, te: 0.84}` | Measured on gemma's own probe. en and cm are deliberately absent: gemma passed both under the shared defaults. |
+| The run logs its regime | `compliance <bucket>: <value> measured on <generator>` / `shared default` | gemma inherited qwen's 0.55 for a whole run without one line of the log naming it. |
+| A changed selection cap aborts | `load_or_record_selection` compares the recorded limit | A frozen record outranks the config and was reused verbatim, so a recut cap would have been read, logged as "reusing", and ignored — generating the old 500 passages while the config said 250. Same bug class, found while fixing this one. |
+
+### Scope cuts — a compute constraint, not a statistical one
+
+Measured on this card: gemma decodes hi at ~10 tok/s aggregate across 4 workers
+against qwen's ~40, roughly 4× slower. At that rate gemma's remaining assignment
+alone projected to **22.3 hours** (cm 1.8 h, en 4.1 h, hi 6.9 h, te 9.4 h) — te is
+42 % of it, because Telugu runs 4.942 tokens/word against English's 1.297.
+
+| Decision | Value | Why |
+|---|---|---|
+| gemma and mistral caps | hi 500 → **250**, te 400 → **200** | Wall-clock. qwen keeps 500/400 — already generated and frozen. Across three seen generators this still leaves ~1,150 hi and ~1,000 te machine rows. |
+| Held-out generators drop `en` | `heldout_drop_buckets: [en]` | llama and phi are test-only and exist to prove unseen-generator generalisation (non-negotiable #4). hi, te and cm carry that test; en is the best-covered bucket in the corpus, so generating it twice more buys nothing. |
+| Keyed on the **role**, not the alias | `spec["role"] == "heldout"` | The reason is the role, so a generator whose role changes carries the behaviour with it instead of stranding a per-alias list. |
+
+The caps are a compute decision and are recorded as one: they do not touch the ≥1,000
+**human** texts per bucket that calibration requires (§5), and `splits.json` is
+untouched.
+
+**Housekeeping.** gemma's 24 failed hi rows moved to
+`data/raw/discarded/gemma__hi__gate-failed-2026-09-23.jsonl` rather than deleted;
+`gemma.jsonl` back to 48 rows (24 cm + 24 en). The 500/400 selection records moved to
+`data/processed/selection/superseded/` with a note — a recut changes *which* passages
+are chosen, not only how many, and it is only safe here because no gemma te rows ever
+existed and the hi rows were discarded.
+
+**Still owed for the other generators.** mistral, llama and phi each need their own
+probe before bulk generation. Their ratios are currently qwen's, which is exactly the
+condition that produced this abort.
+
+---
+
 ## Decisions still open (fill as resolved)
 
 - [ ] Phase 0.1 — what "patent" means (disclosure / IPR-cell / IPO provisional).

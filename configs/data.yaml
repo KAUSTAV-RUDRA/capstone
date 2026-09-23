@@ -211,6 +211,26 @@ machine_corpus:
     # inflates the ask, so a bucket that over-produces is fixed by its template,
     # not here: hi is on the plain template at 0.55 for exactly that reason.
     compliance_ratio: {en: 1.0, hi: 0.55, te: 0.62, cm: 1.0}
+    # The map above is the SHARED DEFAULT for every generator; the one below
+    # overrides it per generator, and a generator absent from it resolves
+    # exactly as before (qwen7b's frozen rows are unaffected).
+    #
+    # A ratio is the fraction of the ask that ONE model writes in ONE bucket, so
+    # it never transfers between models. Everything above was measured on qwen
+    # and then handed to gemma unchanged: gemma writes longer on Indic and
+    # shorter on English (en 0.80 vs qwen 0.87), so hi 0.55 inflated its ask
+    # x1.8 and its 24 gate-probe rows came out at 1.51 of human length, outside
+    # [0.75, 1.25]. decisions.md 2026-09-18 required per-probe measurement; this
+    # key is what makes the config able to express it (2026-09-23).
+    # gemma measured 2026-09-23 on its own 12-passage probe per bucket, current
+    # templates, ask = bin, no compensation (src/data/probe_compliance.py):
+    #   hi 0.73 (mean 0.74, p10 0.60, p90 0.87) against qwen's 0.55
+    #   te 0.84 (mean 0.79, p10 0.58, p90 0.93) against qwen's 0.62
+    # Both are machine/ask, the convention every value in compliance_ratio uses.
+    # en and cm are absent on purpose: gemma's en passed its gate at 0.80 and cm
+    # at 1.00 under the shared defaults, so there is nothing to correct.
+    compliance_ratio_by_generator:
+      gemma: {hi: 0.73, te: 0.84}
     # cm asks from the human passage's own length, not its bin, and inflates only
     # passages of 40+ words (ask = human / 0.75); compliance_ratio is not applied to
     # it. Probed 2026-09-21: 0-40 at 1.19, 40+ at 1.09 (docs/progress.md).
@@ -248,6 +268,23 @@ machine_corpus:
   # the shared-panel alternative was declined because it breaks the
   # one-seen-generator-per-passage rule of decisions.md section 3.
   bucket_limits: {te: 400, hi: 500}
+  # Per-generator override of the caps above. A COMPUTE constraint, not a
+  # statistical one: measured 2026-09-23, gemma decodes hi at ~10 tok/s against
+  # qwen's ~40 on this card, so a full 500/400 assignment for gemma and mistral
+  # would cost days of wall-clock each. qwen keeps 500/400 — already generated,
+  # and its rows are frozen. Across the three seen generators this still leaves
+  # ~1,150 hi and ~1,000 te machine rows, well above what calibration needs.
+  # Changing a cap here requires archiving that generator's selection record;
+  # generate.py aborts rather than reusing a record frozen at the old limit.
+  bucket_limits_by_generator:
+    gemma:   {hi: 250, te: 200}
+    mistral: {hi: 250, te: 200}
+  # Buckets a HELD-OUT generator skips entirely. llama and phi are test-only and
+  # exist to prove unseen-generator generalisation (non-negotiable #4); hi, te
+  # and cm carry that test, and en is already the best-covered bucket in the
+  # corpus, so generating it twice more buys nothing (decisions.md 2026-09-23).
+  # Keyed on the role, so it follows a generator whose role changes.
+  heldout_drop_buckets: [en]
   selection_dir: data/processed/selection
   # `ollama` tags resolve to Q4_K_M where such a tag exists (checked against
   # registry.ollama.ai); the default gemma2:9b and phi3.5:3.8b tags are Q4_0,

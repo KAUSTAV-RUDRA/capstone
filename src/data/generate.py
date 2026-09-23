@@ -290,6 +290,21 @@ def load_or_record_selection(path: Path, prompts: Sequence[dict[str, Any]], limi
     """
     if path.exists():
         record = json.loads(path.read_text(encoding="utf-8"))
+        recorded = int(record.get("limit", len(record["ids"])))
+        if recorded != limit:
+            # A frozen record outranks the config, so a recut cap would otherwise
+            # be read, logged as "reusing", and silently ignored — the same class
+            # of silent-config bug as a compliance ratio keyed on the bucket alone
+            # (2026-09-23). Recutting is a decision, so it is made by hand.
+            raise SystemExit(
+                f"\nSELECTION CAP CHANGED — bucket '{bucket}', generator '{generator}'\n"
+                f"  {path} was frozen at limit {recorded}, the config now asks for {limit}.\n\n"
+                f"A frozen selection is reused verbatim, so this run would have generated the OLD\n"
+                f"{recorded} passages and ignored the new cap. Archive the record and re-run to cut a\n"
+                f"fresh one — but only if no rows for this bucket are on disk yet, because a recut\n"
+                f"changes WHICH passages are chosen, not just how many:\n"
+                f"  mkdir -p data/processed/selection/superseded\n"
+                f"  mv {path} data/processed/selection/superseded/\n")
         log.info("bucket %s: reusing frozen selection of %d ids from %s",
                  bucket, len(record["ids"]), path)
         return set(record["ids"])
@@ -352,6 +367,39 @@ def token_budget(n_words: int, fertility: float, overshoot: float = 1.3,
 #:            plain one gave) - compensating a control ratio would double-count
 #:   cm 1.0   unused from 2026-09-21: cm's ask comes from ASK_FROM_HUMAN instead
 COMPLIANCE_RATIO: dict[str, float] = {"en": 1.0, "hi": 0.55, "te": 0.62, "cm": 1.0}
+
+#: Per-generator overrides of :data:`COMPLIANCE_RATIO`, keyed generator alias
+#: then bucket. The flat map above stays every generator's default, so a
+#: generator absent from here resolves exactly as it did before this key
+#: existed — qwen7b's 6,284 frozen rows included.
+#:
+#: A compliance ratio is a property of the generator AND the bucket, never the
+#: bucket alone: it measures what fraction of the ask THIS model writes in THIS
+#: language. The values above were all measured on qwen and then applied to
+#: gemma unchanged, which is how gemma's hi ask came out inflated x1.8 — gemma
+#: writes longer on Indic and shorter on English (en 0.80 against qwen's 0.87),
+#: so its hi probe landed at 1.51 of human length and failed the gate
+#: (2026-09-23). decisions.md 2026-09-18 already required every regime to be
+#: measured on its own probe and never carried across by analogy; keying this on
+#: the bucket alone is how the config carried it across silently anyway.
+COMPLIANCE_BY_GENERATOR: dict[str, dict[str, float]] = {}
+
+
+def compliance_for(generator: str, bucket: str, flat: dict[str, float],
+                   by_generator: dict[str, dict[str, float]]) -> float:
+    """The compliance ratio for one generator in one bucket.
+
+    ``by_generator[generator][bucket]`` when that generator names that bucket,
+    else the bucket's entry in ``flat``, else 1.0 (ask for the human length and
+    do not compensate). A generator with an entry for *some* buckets still
+    falls back per bucket, so overriding hi alone leaves en and cm on the
+    shared defaults.
+    """
+    per_generator = by_generator.get(generator) or {}
+    if bucket in per_generator:
+        return float(per_generator[bucket])
+    return float(flat.get(bucket, 1.0))
+
 
 #: Buckets whose ask is the human passage's OWN length rather than its bin, with
 #: passages of ``long_from_words`` or more asked for ``human / long_ratio``.
@@ -1099,6 +1147,22 @@ def main(argv: list[str] | None = None) -> None:
     if unknown:
         parser.error(f"unknown bucket(s) {unknown}; valid: {list(LANGUAGE_BUCKETS)}")
 
+    # Buckets a HELD-OUT generator does not generate at all. Keyed on the role,
+    # not the alias, because the reason is the role: held-out generators are
+    # test-only and exist to prove generalisation (non-negotiable #4), which
+    # hi/te/cm already test, and en is the best-covered bucket in the corpus
+    # (decisions.md 2026-09-23). A role change therefore carries the behaviour
+    # with it instead of stranding a per-alias list.
+    dropped = [b for b in buckets if spec.get("role") == "heldout"
+               and b in set(mc.get("heldout_drop_buckets") or ())]
+    if dropped:
+        buckets = [b for b in buckets if b not in dropped]
+        log.info("generator %s is held-out: dropping bucket(s) %s (machine_corpus.heldout_drop_buckets)",
+                 args.generator, ",".join(dropped))
+        if not buckets:
+            print(f"every requested bucket is dropped for held-out generator '{args.generator}'")
+            return
+
     keep = make_assignment(args.generator, generators, float((mc.get("assignment") or {}).get("heldout_share", 0.30)))
     prompts = load_prompts(human_dir, buckets, args.fraction, args.seed, args.generator, args.limit, keep)
     if not prompts:
@@ -1109,7 +1173,13 @@ def main(argv: list[str] | None = None) -> None:
     # ids are frozen to disk so every later run of this generator selects the same
     # passages, and so the selection is auditable rather than implicit.
     selection_dir = Path(mc.get("selection_dir", "data/processed/selection"))
-    for bucket, raw_limit in (mc.get("bucket_limits") or {}).items():
+    # Per-generator caps override the shared ones. They are a COMPUTE constraint,
+    # not a statistical one: gemma and mistral decode ~4x slower than qwen on this
+    # card, so a full hi/te assignment for each would cost days (decisions.md
+    # 2026-09-23). A generator absent here keeps the shared cap.
+    limits = {**(mc.get("bucket_limits") or {}),
+              **((mc.get("bucket_limits_by_generator") or {}).get(args.generator) or {})}
+    for bucket, raw_limit in limits.items():
         in_bucket = [p for p in prompts if p["bucket"] == bucket]
         limit = int(raw_limit)
         if not in_bucket or len(in_bucket) <= limit:
@@ -1126,11 +1196,13 @@ def main(argv: list[str] | None = None) -> None:
                                                  budget.get("fallback_tokenizer", "Qwen/Qwen2.5-0.5B"), buckets)
     cap = int(budget.get("cap", 2048))
     ratios = {**COMPLIANCE_RATIO, **(budget.get("compliance_ratio") or {})}
+    by_generator = {**COMPLIANCE_BY_GENERATOR, **(budget.get("compliance_ratio_by_generator") or {})}
     ask_rules = {**ASK_FROM_HUMAN, **(budget.get("ask_from_human") or {})}
     for prompt in prompts:
         bucket = prompt["bucket"]
         # Ask for more words than we want, because the model writes short (ratio < 1).
-        prompt["ask_words"] = ask_words_for(prompt, fertility[bucket], float(ratios.get(bucket, 1.0)),
+        prompt["ask_words"] = ask_words_for(prompt, fertility[bucket],
+                                            compliance_for(args.generator, bucket, ratios, by_generator),
                                             cap, ask_rules.get(bucket))
         if prompt["ask_words"] != prompt["n_words"]:
             prompt["prompt"] = build_prompt(prompt["text"], bucket, prompt["ask_words"])
@@ -1144,6 +1216,16 @@ def main(argv: list[str] | None = None) -> None:
             log.info("budget %s: %.3f tokens/word (%s) -> num_predict %d..%d, %d of %d at the %d cap",
                      bucket, fertility[bucket], fertility_source, min(budgets), max(budgets),
                      sum(b >= cap for b in budgets), len(budgets), cap)
+            # Say which compliance regime this bucket ran under and where it came
+            # from. gemma inherited qwen's hi 0.55 for a whole run without one
+            # line of the log naming it (2026-09-23).
+            if bucket in ask_rules:
+                source = f"ask_from_human {ask_rules[bucket]}"
+            elif bucket in (by_generator.get(args.generator) or {}):
+                source = f"{compliance_for(args.generator, bucket, ratios, by_generator):.2f} measured on {args.generator}"
+            else:
+                source = f"{compliance_for(args.generator, bucket, ratios, by_generator):.2f} shared default"
+            log.info("compliance %s: %s", bucket, source)
 
     out_path = Path(args.out_dir or mc.get("output_dir", "data/raw/machine")) / f"{generator_slug(args.generator)}.jsonl"
     check_output_compatible(out_path, backend, model)
