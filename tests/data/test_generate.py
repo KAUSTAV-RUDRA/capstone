@@ -213,11 +213,10 @@ def test_config_carries_gemmas_measured_ratios_and_leaves_qwen_alone() -> None:
     # Measured on gemma's own 12-passage probe, 2026-09-23. qwen's 0.55/0.62 are
     # what gemma was wrongly given; these are what gemma actually does.
     assert overrides["gemma"] == {"hi": 0.73, "te": 0.84}
-    # mistral measured 2026-09-24. te is 1.00 rather than its measured 1.57
-    # because a ratio only inflates; the entry exists so te does not inherit the
-    # shared 0.62 and land near 3x human. Three generators, three hi regimes
-    # (0.55 / 0.73 / 0.88), which is why the key cannot be the bucket alone.
-    assert overrides["mistral"] == {"hi": 0.88, "te": 1.00}
+    # mistral measured 2026-09-24. No te entry: mistral does not generate te at
+    # all. Three generators, three hi regimes (0.55 / 0.73 / 0.88), which is why
+    # the key cannot be the bucket alone.
+    assert overrides["mistral"] == {"hi": 0.88}
     # qwen7b must never appear: its rows are generated and frozen, and a ratio
     # change would silently re-regime a corpus already on disk.
     assert "qwen7b" not in overrides
@@ -261,6 +260,44 @@ def test_config_caps_gemma_and_mistral_but_leaves_qwen_frozen() -> None:
     resolved = {**shared, **per_generator["gemma"]}
     assert resolved == {"hi": 250, "te": 200}
     assert {**shared, **per_generator.get("qwen7b", {})} == shared
+
+
+def test_bucket_exclusions_by_role_and_by_generator() -> None:
+    heldout_drop = ["en"]
+    by_generator = {"mistral": ["te"]}
+    # By generator, whatever the role: mistral is seen and still skips te.
+    assert generate.excluded_buckets("mistral", "seen", heldout_drop, by_generator) == {
+        "te": "machine_corpus.drop_buckets_by_generator"}
+    # By role: a held-out generator skips en without being named anywhere.
+    assert set(generate.excluded_buckets("llama", "heldout", heldout_drop, by_generator)) == {"en"}
+    # A seen generator with no entry excludes nothing.
+    assert generate.excluded_buckets("gemma", "seen", heldout_drop, by_generator) == {}
+    # Both rules at once compose, and the per-generator reason wins on overlap.
+    both = generate.excluded_buckets("mistral", "heldout", heldout_drop, {"mistral": ["te", "en"]})
+    assert set(both) == {"en", "te"}
+    assert both["en"] == "machine_corpus.drop_buckets_by_generator"
+    # Empty config is not an error.
+    assert generate.excluded_buckets("gemma", "seen", (), {}) == {}
+
+
+def test_config_excludes_te_for_mistral_only() -> None:
+    mc = load_config(DATA_CONFIG)["machine_corpus"]
+    by_generator = mc["drop_buckets_by_generator"]
+    assert by_generator == {"mistral": ["te"]}
+    role = {a: s["role"] for a, s in mc["generators"].items()}
+    kept = {a: [b for b in ["en", "hi", "te", "cm"]
+                if b not in generate.excluded_buckets(a, role[a], mc["heldout_drop_buckets"], by_generator)]
+            for a in mc["generators"]}
+    assert kept["mistral"] == ["en", "hi", "cm"], "mistral covers en/hi/cm, never te"
+    assert kept["qwen7b"] == ["en", "hi", "te", "cm"]
+    assert kept["gemma"] == ["en", "hi", "te", "cm"]
+    assert kept["llama"] == kept["phi"] == ["hi", "te", "cm"]
+    # te is still covered by two seen generators: qwen 400 + gemma 200 = 600.
+    te_caps = {a: {**mc["bucket_limits"], **(mc["bucket_limits_by_generator"].get(a) or {})}["te"]
+               for a in ["qwen7b", "gemma"]}
+    assert te_caps == {"qwen7b": 400, "gemma": 200} and sum(te_caps.values()) == 600
+    # A generator that does not generate te must not carry a te ratio.
+    assert "te" not in mc["budget"]["compliance_ratio_by_generator"]["mistral"]
 
 
 def test_heldout_generators_drop_en_and_seen_ones_do_not() -> None:

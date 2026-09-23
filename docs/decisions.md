@@ -1073,6 +1073,70 @@ condition that produced this abort.
 
 ---
 
+## 2026-09-24 — mistral does not generate `te`: the cap, not the template
+
+**What the probe found.** mistral measured with `probe_compliance.py`, 12 passages
+per bucket, current templates, ask = bin, no compensation:
+
+| bucket | machine/ask | mean | p10 | p90 | machine/human |
+|---|---|---|---|---|---|
+| hi | **0.88** | 0.94 | 0.77 | 1.19 | 0.95 |
+| te | **1.57** | 1.62 | 1.08 | 2.15 | **1.65** |
+
+`hi` is healthy and close to the ask. `te` over-produces by ~60 %, and 1 of its 12
+rows hit `num_predict`, so 1.57 is a **lower bound**.
+
+**Why this is not a template problem.** mistral's tokenizer reads Telugu at
+**13.309 tokens/word**, against gemma's 4.942 and qwen's 11.919. At that fertility
+the 3600-token cap holds ~270 Telugu words, and `num_predict` for mistral te
+computed to **3600..3600** — every single ask pinned at the cap regardless of
+passage length.
+
+That is the structural part. Length-matching requires the *passage* to set the
+length; here the *budget* does. A prompt template changes what the model is asked
+for, and a compliance ratio changes how much it is asked for, but neither can move
+a ceiling that binds every row identically. Over-production at 1.65× is then a
+second, independent failure on top of it — measured under both templates.
+
+Raising the cap is not a way out either: 3600 tokens already sits at the `num_ctx`
+budget the 4-worker configuration allows on this card, and a cap large enough to
+hold long Telugu passages at 13.3 tokens/word would cut concurrency for every other
+bucket.
+
+| Decision | Value | Why |
+|---|---|---|
+| mistral does not generate `te` | `drop_buckets_by_generator: {mistral: [te]}` | The cap, not the template. Every te ask pins at 3600 tokens whatever the passage length, so no template or ratio reaches it. |
+| A second, per-generator exclusion | Separate from `heldout_drop_buckets` | The reasons differ in kind. The held-out drop is about a generator's ROLE in the design; this one is about a specific model's tokenizer. Keying both on the same list would merge two unrelated arguments. |
+| Both report their source | `generator X: bucket Y excluded (<source>)` | A bucket that silently fails to appear is the failure mode this whole line of work has been about. |
+| mistral's te compliance ratio | **Removed**, not set to 1.00 | A generator that does not generate a bucket must not carry a ratio for it. The 1.00 placeholder recorded 2026-09-24 was a guard against inheriting the shared 0.62; with te excluded there is nothing to guard. |
+
+### Coverage — reported, not uniform
+
+mistral covers **en, hi, cm**. `te` is covered by **qwen7b (400) and gemma (200) =
+600 machine rows across two seen generators**, against three for every other
+bucket.
+
+This is a deliberate, recorded asymmetry rather than a gap to be closed. Generator
+coverage per bucket is a property of the corpus that gets **reported**; nothing in
+the design requires it to be uniform, and non-negotiable #4 constrains the held-out
+generators, not how many seen generators appear in each bucket. Forcing mistral into
+`te` would buy uniformity with rows whose length is set by a token cap — worse
+corpus, better-looking table.
+
+**Goes in Limitations**, alongside the 2026-09-23 note that gemma's `te` passages
+are length-matched at the short end and short at the long end. Both are statements
+about how far `te` length-matching holds, and they belong together:
+
+> Telugu coverage rests on two of the three seen generators. mistral was excluded
+> from the bucket because its tokenizer's Telugu fertility (13.3 tokens/word) pins
+> every generation budget at the context cap, making length-matched generation
+> impossible rather than merely poorly tuned.
+
+**Unchanged.** mistral's `hi` is ready to generate at 0.88. qwen7b's and gemma's te
+selections, caps and rows are untouched.
+
+---
+
 ## Decisions still open (fill as resolved)
 
 - [ ] Phase 0.1 — what "patent" means (disclosure / IPR-cell / IPO provisional).

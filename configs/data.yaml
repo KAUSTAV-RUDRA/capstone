@@ -231,20 +231,10 @@ machine_corpus:
     # at 1.00 under the shared defaults, so there is nothing to correct.
     compliance_ratio_by_generator:
       gemma:   {hi: 0.73, te: 0.84}
-      # mistral measured 2026-09-24, same probe method:
-      #   hi 0.88 (mean 0.94, p10 0.77, p90 1.19) - writes close to the ask
-      #   te 1.57 (mean 1.62, p10 1.08, p90 2.15) - OVER-produces by ~60 %
-      # te is recorded as 1.00, not 1.57, because a ratio only ever inflates the
-      # ask (compensated_words clamps to 1.0): there is no value that corrects
-      # over-production, and the entry must exist so te does NOT inherit the
-      # shared 0.62, which would inflate the ask x1.61 on a model already at
-      # 1.57 and land it near 3x human. At ask = bin with no compensation te
-      # still reads 1.65 of human against a 1.25 ceiling, so mistral te WILL
-      # fail its gate until its Telugu TEMPLATE changes - the same conclusion
-      # hi reached on 2026-09-18 and cm on 2026-09-19. 1 of 12 te rows hit
-      # num_predict (13.309 tokens/word puts every te ask at the 3600 cap), so
-      # 1.57 is a lower bound. Do not bulk-generate mistral te on this template.
-      mistral: {hi: 0.88, te: 1.00}
+      # mistral measured 2026-09-24, same probe method: hi 0.88 (mean 0.94,
+      # p10 0.77, p90 1.19), writing close to the ask. No te entry — mistral
+      # does not generate te at all (drop_buckets_by_generator below).
+      mistral: {hi: 0.88}
     # cm asks from the human passage's own length, not its bin, and inflates only
     # passages of 40+ words (ask = human / 0.75); compliance_ratio is not applied to
     # it. Probed 2026-09-21: 0-40 at 1.19, 40+ at 1.09 (docs/progress.md).
@@ -299,6 +289,20 @@ machine_corpus:
   # corpus, so generating it twice more buys nothing (decisions.md 2026-09-23).
   # Keyed on the role, so it follows a generator whose role changes.
   heldout_drop_buckets: [en]
+  # Buckets a NAMED generator does not generate, whatever its role. Separate
+  # from heldout_drop_buckets because the reason is the model, not the role.
+  #
+  # mistral / te: mistral's tokenizer reads Telugu at 13.309 tokens/word against
+  # gemma's 4.942, so a 3600-token budget holds ~270 Telugu words and EVERY te
+  # ask pins at the cap regardless of passage length. Length-matching is
+  # impossible when the budget, not the passage, sets the length — no template
+  # and no compliance ratio reaches it. Measured the same day, mistral also
+  # over-produced te at 1.65x human under both templates. te is covered by
+  # qwen (400) and gemma (200) instead: 600 rows across two seen generators.
+  # Generator coverage per bucket is reported, not required to be uniform
+  # (decisions.md 2026-09-24).
+  drop_buckets_by_generator:
+    mistral: [te]
   selection_dir: data/processed/selection
   # `ollama` tags resolve to Q4_K_M where such a tag exists (checked against
   # registry.ollama.ai); the default gemma2:9b and phi3.5:3.8b tags are Q4_0,

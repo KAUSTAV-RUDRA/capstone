@@ -385,6 +385,35 @@ COMPLIANCE_RATIO: dict[str, float] = {"en": 1.0, "hi": 0.55, "te": 0.62, "cm": 1
 COMPLIANCE_BY_GENERATOR: dict[str, dict[str, float]] = {}
 
 
+def excluded_buckets(generator: str, role: str, heldout_drop: Sequence[str],
+                     by_generator: dict[str, Sequence[str]]) -> dict[str, str]:
+    """Buckets ``generator`` does not generate, mapped to why.
+
+    Two independent exclusions, both reported so a missing bucket is always
+    traceable to the rule that removed it:
+
+    * by ROLE — a held-out generator skips ``heldout_drop`` (en), because
+      held-out models are test-only and exist to prove generalisation, which
+      hi/te/cm already test (decisions.md 2026-09-23).
+    * by GENERATOR — ``by_generator[generator]``, for a model whose tokenizer
+      makes a bucket structurally unrunnable rather than merely badly tuned.
+      mistral reads Telugu at 13.309 tokens/word, so every te ask pins at the
+      3600-token cap whatever the passage length: the budget sets the length
+      instead of the passage, which no template or ratio can reach
+      (decisions.md 2026-09-24).
+
+    A bucket excluded by both reports the per-generator reason, the more
+    specific of the two.
+    """
+    excluded: dict[str, str] = {}
+    if role == "heldout":
+        for bucket in heldout_drop:
+            excluded[bucket] = "held-out role, machine_corpus.heldout_drop_buckets"
+    for bucket in by_generator.get(generator) or ():
+        excluded[bucket] = "machine_corpus.drop_buckets_by_generator"
+    return excluded
+
+
 def compliance_for(generator: str, bucket: str, flat: dict[str, float],
                    by_generator: dict[str, dict[str, float]]) -> float:
     """The compliance ratio for one generator in one bucket.
@@ -1147,20 +1176,29 @@ def main(argv: list[str] | None = None) -> None:
     if unknown:
         parser.error(f"unknown bucket(s) {unknown}; valid: {list(LANGUAGE_BUCKETS)}")
 
-    # Buckets a HELD-OUT generator does not generate at all. Keyed on the role,
-    # not the alias, because the reason is the role: held-out generators are
-    # test-only and exist to prove generalisation (non-negotiable #4), which
-    # hi/te/cm already test, and en is the best-covered bucket in the corpus
-    # (decisions.md 2026-09-23). A role change therefore carries the behaviour
-    # with it instead of stranding a per-alias list.
-    dropped = [b for b in buckets if spec.get("role") == "heldout"
-               and b in set(mc.get("heldout_drop_buckets") or ())]
+    # Buckets this generator does not generate at all, from two independent
+    # exclusions. Both name their source in the log, so a missing bucket is
+    # always traceable to the line that removed it.
+    #
+    # By ROLE: held-out generators are test-only and exist to prove
+    # generalisation (non-negotiable #4), which hi/te/cm already test, and en is
+    # the best-covered bucket (decisions.md 2026-09-23). Keyed on the role so a
+    # generator whose role changes carries the behaviour with it.
+    #
+    # By GENERATOR: a model whose tokenizer makes a bucket structurally
+    # unrunnable. mistral reads Telugu at 13.309 tokens/word, so every te ask
+    # pins at the 3600-token cap whatever the passage length — not a template
+    # problem and not a ratio problem (decisions.md 2026-09-24).
+    excluded = excluded_buckets(args.generator, spec.get("role", "seen"),
+                                mc.get("heldout_drop_buckets") or (),
+                                mc.get("drop_buckets_by_generator") or {})
+    dropped = [b for b in buckets if b in excluded]
     if dropped:
         buckets = [b for b in buckets if b not in dropped]
-        log.info("generator %s is held-out: dropping bucket(s) %s (machine_corpus.heldout_drop_buckets)",
-                 args.generator, ",".join(dropped))
+        for bucket in dropped:
+            log.info("generator %s: bucket %s excluded (%s)", args.generator, bucket, excluded[bucket])
         if not buckets:
-            print(f"every requested bucket is dropped for held-out generator '{args.generator}'")
+            print(f"every requested bucket is excluded for generator '{args.generator}'")
             return
 
     keep = make_assignment(args.generator, generators, float((mc.get("assignment") or {}).get("heldout_share", 0.30)))
