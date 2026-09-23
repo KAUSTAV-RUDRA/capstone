@@ -5,6 +5,136 @@ Newest entries at the top.
 
 ---
 
+## 2026-09-23 — gemma: the hi gate abort, per-generator compliance, and all four buckets passing
+
+A 110-minute gemma run aborted at the `hi` gate (median 1.48 against a 1.25
+ceiling, 83 % of rows over). Cause, fix, scope cuts and re-run are in
+`docs/decisions.md` 2026-09-23 and commit `afd8342`. This entry is the evidence
+trail and the numbers.
+
+### 1. The abort and its cause
+
+`compliance_ratio {hi 0.55, te 0.62}` was measured on **qwen** and applied to
+**gemma** unchanged, because the config keys the ratio on the bucket alone. A
+ratio is the fraction of the ask a model writes, so it belongs to the generator
+*and* the bucket. gemma's measured raw hi ratio is 0.73, so under a 0.55 ask
+(×1.82 inflation) it wrote 0.73 × 1.82 = 1.33 bins ≈ **1.46 of human**, against
+**1.48 observed** — the arithmetic predicts the failure to within 0.02.
+
+`decisions.md` 2026-09-18 already required every regime to be measured on its own
+probe and never carried across by analogy. The rule was prose; the config could
+not express it, so it carried the value across silently.
+
+### 2. Measured — gemma's own ratios
+
+New script `src/data/probe_compliance.py`: 12 passages per bucket, current
+template, ask = the length bin with **no** compensation, `num_predict` at 3×
+headroom so over-production is measured rather than clipped. 0 of 24 rows
+truncated. Words counted after `strip_boilerplate()`, as the gate counts them.
+
+| bucket | machine/ask | mean | p10 | p90 | qwen's value |
+|---|---|---|---|---|---|
+| hi | **0.73** | 0.74 | 0.60 | 0.87 | 0.55 |
+| te | **0.84** | 0.79 | 0.58 | 0.93 | 0.62 |
+
+Both machine/**ask**, the convention every existing value uses.
+
+### 3. Re-run — all four gates pass
+
+`python -m src.data.generate --generator gemma --buckets cm,en,hi,te`,
+22:16–23:50 (94 min, stopped on schedule rather than at the 110-minute exit).
+
+| bucket | gate median | before | verdict |
+|---|---|---|---|
+| cm | 1.00 | 1.00 | PASS |
+| en | 0.80 | 0.80 | PASS |
+| hi | **1.07** (mean 1.10, p90 1.23) | 1.48 FAIL | **PASS** |
+| te | **0.80** (mean 0.86, p90 1.00) | never reached | **PASS** |
+
+0 % at the token cap in every bucket. Predicted medians before generating were
+hi 1.05 and te 0.89, from the fitted ask→output regression.
+
+Throughput roughly doubled as a side effect: **24.6 s/row on hi against 57.4 s/row**
+under the old ratio, because the ×1.82 inflation was paying to decode ~450 tokens
+a row where ~300 was called for. Run average 15.4 tok/s aggregate, 0 retries,
+0 failed requests.
+
+### 4. `te` passes on a median its short half carries — for Limitations
+
+The `te` gate median of 0.80 conceals a split. Across the 24 probe rows, by human
+passage length:
+
+| human length | n | median | range | below 0.75 |
+|---|---|---|---|---|
+| ≤ 160 words | 12 | 0.95 | 0.77–1.32 | **0** |
+| > 160 words | 12 | **0.75** | 0.58–0.96 | **6** |
+| all | 24 | 0.80 | — | 6 |
+
+Rows above 200 human words read 0.78, 0.66, 0.73, 0.58, 0.73, 0.68, 0.75 — five of
+seven under the floor.
+
+**This is a corpus property, not a defect to tune.** Regressing output words on ask
+words gives hi a slope of 0.65 with intercept 14 (r = 0.86), but te a slope of
+**0.36 with intercept 69** (r = 0.73): gemma writes roughly 69 Telugu words plus a
+third of whatever is asked, so its output is far less responsive to the ask than
+hi's. Because the ask barely moves it, **no compliance ratio can correct the long
+tail** — the ratio only inflates the ask, and at slope 0.36 that inflation is
+mostly absorbed. Raising the ratio further would over-produce the short half
+before it fixed the long half.
+
+Consequence to state in **Limitations**: in `te`, gemma's machine passages are
+length-matched to human ones at the short end and systematically shorter at the
+long end. Length is therefore a weaker matched covariate for `te` than for the
+other buckets, and any `te` result should be read with that in mind rather than
+treated as a like-for-like length match. Correcting it needs a different Telugu
+template, measured on its own probe — not a ratio.
+
+### 5. Tally at the stop
+
+| bucket | rows | target | |
+|---|---|---|---|
+| cm | 676 | 790 | 85.6 % |
+| en | 24 | 712 | 3.4 % |
+| hi | 24 | 250 | 9.6 % |
+| te | 24 | 200 | 12.0 % |
+| **total** | **748** | **1952** | **38.3 %** |
+
+700 rows generated this sitting in 94 min (7.4 rows/min). en/hi/te stand at their
+24 gate-probe rows; the bulk phase worked through `cm` first.
+
+**Integrity after a forced stop:** 0 duplicate `id`, 0 duplicate `prompt_id`, 0
+truncated rows, 0 malformed lines. `run_concurrent` flushes each row under a lock,
+so a hard stop loses only in-flight requests, which the next resume regenerates.
+
+**cm across all 676 rows** (not just the probe): median 1.02, mean 1.05, p90 1.40,
+0 % at cap, romanised-Hindi share 0.32 against a human 0.32 — and **3 rows carry an
+in-body emoji**, counted after stripping. qwen7b's finished cm bucket reads 3 of
+701. These are Part 13 drops, not gate failures: the gate judges the 24-row probe,
+which was clean.
+
+### 6. Corpus state, all generators
+
+| generator | role | cm | en | hi | te | total |
+|---|---|---|---|---|---|---|
+| qwen7b | seen | 701/701 | 730/730 | 500/500 | 400/400 | 2331/2331 |
+| gemma | seen | 676/790 | 24/712 | 24/250 | 24/200 | 748/1952 |
+| mistral | seen | 0/709 | 0/758 | 0/250 | 0/200 | 0/1917 |
+| llama | heldout | 0/647 | — | 0/500 | 0/400 | 0/1547 |
+| phi | heldout | 0/629 | — | 0/500 | 0/400 | 0/1529 |
+
+**3,079 / 9,276 machine rows (33.2 %).** Targets reflect the 2026-09-23 scope cuts:
+gemma and mistral capped at hi 250 / te 200, and held-out generators skip `en`.
+
+**Verify:** `PYTHONPATH=. python tests/data/test_generate.py` → 40 PASS, 0 FAIL.
+Resume gemma with the same command; it picks up from the 748 rows on disk.
+
+**Next:** gemma has ~1,200 rows left, ~8 h at the observed rate. mistral, llama and
+phi are all still on qwen's compliance ratios — the exact condition that caused
+tonight's abort — and each needs `probe_compliance.py` run on its own buckets
+before any bulk generation.
+
+---
+
 ## 2026-09-22 — cm regenerated under the long-ask template; the gate gains an emoji check
 
 Step 4 of the cm plan. The emoji check is committed (`e17674e`). v0's 701 rows are
