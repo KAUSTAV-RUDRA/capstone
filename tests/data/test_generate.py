@@ -213,6 +213,11 @@ def test_config_carries_gemmas_measured_ratios_and_leaves_qwen_alone() -> None:
     # Measured on gemma's own 12-passage probe, 2026-09-23. qwen's 0.55/0.62 are
     # what gemma was wrongly given; these are what gemma actually does.
     assert overrides["gemma"] == {"hi": 0.73, "te": 0.84}
+    # mistral measured 2026-09-24. te is 1.00 rather than its measured 1.57
+    # because a ratio only inflates; the entry exists so te does not inherit the
+    # shared 0.62 and land near 3x human. Three generators, three hi regimes
+    # (0.55 / 0.73 / 0.88), which is why the key cannot be the bucket alone.
+    assert overrides["mistral"] == {"hi": 0.88, "te": 1.00}
     # qwen7b must never appear: its rows are generated and frozen, and a ratio
     # change would silently re-regime a corpus already on disk.
     assert "qwen7b" not in overrides

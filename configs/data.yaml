@@ -230,7 +230,21 @@ machine_corpus:
     # en and cm are absent on purpose: gemma's en passed its gate at 0.80 and cm
     # at 1.00 under the shared defaults, so there is nothing to correct.
     compliance_ratio_by_generator:
-      gemma: {hi: 0.73, te: 0.84}
+      gemma:   {hi: 0.73, te: 0.84}
+      # mistral measured 2026-09-24, same probe method:
+      #   hi 0.88 (mean 0.94, p10 0.77, p90 1.19) - writes close to the ask
+      #   te 1.57 (mean 1.62, p10 1.08, p90 2.15) - OVER-produces by ~60 %
+      # te is recorded as 1.00, not 1.57, because a ratio only ever inflates the
+      # ask (compensated_words clamps to 1.0): there is no value that corrects
+      # over-production, and the entry must exist so te does NOT inherit the
+      # shared 0.62, which would inflate the ask x1.61 on a model already at
+      # 1.57 and land it near 3x human. At ask = bin with no compensation te
+      # still reads 1.65 of human against a 1.25 ceiling, so mistral te WILL
+      # fail its gate until its Telugu TEMPLATE changes - the same conclusion
+      # hi reached on 2026-09-18 and cm on 2026-09-19. 1 of 12 te rows hit
+      # num_predict (13.309 tokens/word puts every te ask at the 3600 cap), so
+      # 1.57 is a lower bound. Do not bulk-generate mistral te on this template.
+      mistral: {hi: 0.88, te: 1.00}
     # cm asks from the human passage's own length, not its bin, and inflates only
     # passages of 40+ words (ask = human / 0.75); compliance_ratio is not applied to
     # it. Probed 2026-09-21: 0-40 at 1.19, 40+ at 1.09 (docs/progress.md).
