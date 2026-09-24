@@ -1,9 +1,136 @@
-# Corpus card — human text (`data/raw/human/`)
+# Corpus card — IndicStudentMGT
 
-The human half of **IndicStudentMGT**: 8,800 passages across four language
-buckets, built by `src/data/build_human_corpus.py` from `configs/data.yaml`.
-Machine text, length matching and the frozen splits are added later (parts-plan
-Parts 4–13); this card covers the human side only.
+**Corpus v1 is frozen (2026-09-24): human + qwen7b.** §0 describes the frozen
+corpus (`data/processed/corpus.jsonl`, `data/processed/splits.json`); §1–§7 describe
+the human source text it was built from (`data/raw/human/`).
+
+---
+
+## 0. Frozen corpus v1 (qwen7b)
+
+Built once by
+
+```
+python -m src.data.freeze_splits --config configs/data.yaml --allow-small-buckets
+```
+
+and frozen (non-negotiable #6; the script refuses to run again). `data/` is
+gitignored, so the committed evidence is the hashes:
+
+| file | rows | sha256 |
+|---|---|---|
+| `data/processed/splits.json` | 8,896 ids | `1a71fa2f0ddcd404c10cb8514680fb8e98240a985e2001a1766e78d502f17471` |
+| `data/processed/corpus.jsonl` | 8,896 | `9b0f10e988debbff78dbec39eac268aa9124b49a2ceeb1f2bca0eed9ceb657a0` |
+
+Rows carry the 11 schema fields (`id | text | label | language | code_mix_ratio |
+generator | domain | length_tokens | attack_type | writer_L1_band | split`) then
+`length_words | source | prompt_id`. `text` is the **cleaned** text; `length_tokens`
+is counted with the Head B scorer's tokenizer (ai-forever/mGPT); `code_mix_ratio` is
+recomputed from the cleaned text for both classes.
+
+**Generators.** v1 contains one seen generator, qwen7b (qwen2.5:7b-instruct Q4_K_M).
+gemma and mistral join after Review-2; their rows take the train/test group already
+recorded for their prompt in `splits.json` (`prompt_groups`), so the frozen file does
+not change. No held-out generator exists yet, so T3 is not computable on v1.
+
+### Pipeline
+
+1. **Clean** (`src/data/clean_artifacts.py`), identically for human and machine:
+   strip trailing assistant chatter, leading preambles ("Certainly!", "Here is a short
+   passage of about 150 words…:"), markdown emphasis/headers, and `clean_informal` for
+   cm; then drop rows with an emoji, instruction echo / meta response / chat-template
+   leak, truncation (machine only), or a script the bucket does not use.
+2. **Calibration draw**: 1,000 human rows per bucket, calibration-eligible sources
+   only (cm: cmu_hinglish_dog + HinGE), stratified by source × length bin.
+3. **Length-match** train/test: 5 quantile bins of train/test human word counts.
+   en/hi/te trim **human** to the machine distribution (human is the surplus); cm trims
+   **machine** to the human distribution.
+4. **Split** by prompt group: a human passage and its machine continuation always
+   share a split; human and machine train/test are exact halves.
+
+### Cleaning — % dropped per bucket × source
+
+| bucket | source | rows | dropped | % | emoji | echo | truncated | stray script |
+|---|---|---|---|---|---|---|---|---|
+| en | hc3 | 605 | 3 | 0.5 | 0 | 0 | – | 3 |
+| en | samanantar_en | 1100 | 0 | 0.0 | 0 | 0 | – | 0 |
+| en | wikipedia | 495 | 4 | 0.8 | 2 | 0 | – | 2 |
+| en | **qwen7b** | 730 | 10 | 1.4 | 0 | 3 | 0 | 7 |
+| hi | indiccorp_v2 | 1650 | 3 | 0.2 | 2 | 0 | – | 1 |
+| hi | wikipedia | 550 | 30 | 5.5 | 0 | 0 | – | 30 |
+| hi | **qwen7b** | 500 | 34 | 6.8 | 1 | 1 | 15 | 18 |
+| te | indiccorp_v2 | 1650 | 4 | 0.2 | 2 | 0 | – | 2 |
+| te | wikipedia | 550 | 39 | 7.1 | 0 | 0 | – | 39 |
+| te | **qwen7b** | 400 | 72 | 18.0 | 0 | 2 | 3 | 69 |
+| cm | cmu_hinglish_dog | 917 | 4 | 0.4 | 0 | 3 | – | 1 |
+| cm | comi_lingua | 1175 | 4 | 0.3 | 0 | 0 | – | 4 |
+| cm | hinge | 108 | 0 | 0.0 | 0 | 0 | – | 0 |
+| cm | **qwen7b** | 701 | 52 | 7.4 | 3 | 25 | 13 | 15 |
+
+A row can fail more than one rule. Stripping changed 46 en, 31 cm, 1 hi qwen7b rows
+and 3 hc3 / 1–2 Indic human rows. qwen7b te's stray-script drops are mostly Devanagari
+inside Telugu (43 rows). Indic Wikipedia's are names in other Indian scripts; symmetric
+application costs those sources 5–7 % but stays under the 2 %-per-bucket human guard.
+Dropped rows: `data/raw/discarded/part13_clean_v1.jsonl`.
+
+### Final counts — bucket × source × split
+
+| bucket | source | cal | train | test | total |
+|---|---|---|---|---|---|
+| en | hc3 | 275 | 85 | 84 | 444 |
+| en | samanantar_en | 502 | 120 | 134 | 756 |
+| en | wikipedia | 223 | 66 | 54 | 343 |
+| en | qwen7b | – | 359 | 361 | 720 |
+| **en** | **human / machine** | **1000 / –** | **271 / 359** | **272 / 361** | **1543 / 720** |
+| hi | indiccorp_v2 | 760 | 281 | 284 | 1325 |
+| hi | wikipedia | 240 | 111 | 108 | 459 |
+| hi | qwen7b | – | 233 | 233 | 466 |
+| **hi** | **human / machine** | **1000 / –** | **392 / 233** | **392 / 233** | **1784 / 466** |
+| te | indiccorp_v2 | 762 | 274 | 272 | 1308 |
+| te | wikipedia | 238 | 75 | 77 | 390 |
+| te | qwen7b | – | 163 | 165 | 328 |
+| **te** | **human / machine** | **1000 / –** | **349 / 163** | **349 / 165** | **1698 / 328** |
+| cm | cmu_hinglish_dog | 894 | 9 | 10 | 913 |
+| cm | comi_lingua | 0 | 586 | 585 | 1171 |
+| cm | hinge | 106 | 1 | 1 | 108 |
+| cm | qwen7b | – | 82 | 83 | 165 |
+| **cm** | **human / machine** | **1000 / –** | **596 / 82** | **596 / 83** | **2192 / 165** |
+
+**Total 8,896 rows** (7,217 human, 1,679 machine). hi, te and cm have fewer than 500
+machine rows; accepted for v1 and recorded (decisions.md 2026-09-24). Length matching
+excluded 1,976 rows (1,492 human in en/hi/te, 484 machine in cm); their ids and prompt
+groups are in `splits.json` under `excluded.length_match`.
+
+### Length after matching (median words / mGPT tokens)
+
+| bucket | cal human | test human | test machine |
+|---|---|---|---|
+| en | 208 / 283 | 194.5 / 265.5 | 193 / 262 |
+| hi | 159 / 560.5 | 175 / 618.5 | 172 / 646 |
+| te | 155 / 983.5 | 155 / 985 | 156 / 992 |
+| cm | 85 / 145.5 | 20 / 35 | 20 / 36 |
+
+### cm: the bound is calibrated on chat-register Hinglish
+
+cm calibration can only draw from the two date-certain sources, which together barely
+clear the 1,000 floor, so cal is chat turns (cmu_hinglish_dog, median 85 words) and cm's
+human train/test is 98 % social comments (comi_lingua, median 20). **cm's conformal
+bound is calibrated on chat-register Hinglish and holds for that register.** It is not
+guaranteed on comment-register text, and cm's test FPR is reported as measured, not as
+bounded. This is the project's own thesis showing up inside the corpus: a threshold is
+only as good as the match between its calibration population and its deployment
+population (decisions.md 2026-09-24, "Finding"). Every table row for cm carries this
+note.
+
+In en/hi/te the same effect is mild: trimming human train/test to the machine
+lengths shifts the test humans' length distribution relative to cal (table above).
+
+---
+
+## Human source text (`data/raw/human/`)
+
+The human half: 8,800 passages across four language buckets, built by
+`src/data/build_human_corpus.py` from `configs/data.yaml`.
 
 Regenerate any bucket with:
 

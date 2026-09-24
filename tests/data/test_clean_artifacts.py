@@ -55,9 +55,13 @@ def test_strips_stacked_sign_offs_but_never_the_whole_passage() -> None:
 
 
 def test_strips_preambles_and_reports_fraction() -> None:
-    """Placeholder: 'Sure! Here is...' preambles removed; fraction stripped reported."""
-    # TODO(phase-2 step-2.1.4): test artefact cleaning.
-    raise NotImplementedError
+    """'Sure! Here is...' preambles removed; fraction stripped reported."""
+    from src.data.clean_artifacts import clean_text
+
+    out, frac = clean_text("Sure! Here is the passage:\nRivers flow downhill.", "en")
+    assert out == "Rivers flow downhill."
+    assert 0.4 < frac < 0.6
+    assert clean_text("Rivers flow downhill.", "en") == ("Rivers flow downhill.", 0.0)
 
 
 if __name__ == "__main__":
@@ -75,3 +79,30 @@ if __name__ == "__main__":
                 failures += 1
                 print(f"FAIL {name}: {exc!r}")
     sys.exit(1 if failures else 0)
+
+
+def test_clean_strips_preamble_and_markdown_but_keeps_in_character_sure() -> None:
+    from src.data.clean_artifacts import clean_text
+
+    text = "Certainly! Here is a short passage of about 150 words on the topic:\n\n**Stars** burn hydrogen."
+    assert clean_text(text, "en")[0] == "Stars burn hydrogen."
+    assert clean_text("Certainly! A stack is a data structure.", "en")[0] == "A stack is a data structure."
+    assert clean_text("Sure, buddy! Abhi main khel rha hoon.", "cm")[0].startswith("Sure, buddy!")
+
+
+def test_drop_rules_are_symmetric_and_judge_cleaned_text() -> None:
+    from src.data.clean_artifacts import clean_rows
+
+    rows = [
+        {"id": "h", "label": 0, "language": "te", "text": "తెలుగు వార్త ఇది.", "source": "x"},
+        {"id": "m1", "label": 1, "language": "te", "text": "తెలుగు व वार्त.", "generator": "g"},
+        {"id": "m2", "label": 1, "language": "cm", "text": "Yeh accha hai 😊 yaar.", "generator": "g"},
+        {"id": "m3", "label": 1, "language": "hi", "text": "कुछ पाठ <|im_start|>user", "generator": "g"},
+        {"id": "m4", "label": 1, "language": "en", "text": "Fine text.", "generator": "g", "truncated": True},
+        {"id": "m5", "label": 1, "language": "cm", "text": "Accha hai.\n\nLet me know if you'd like more! 😊",
+         "generator": "g"},
+    ]
+    kept, dropped, _ = clean_rows(rows, enforce_guard=False)
+    reasons = {r["id"]: r["drop_reasons"] for r in dropped}
+    assert reasons == {"m1": ["stray_script"], "m2": ["emoji"], "m3": ["echo"], "m4": ["truncated"]}
+    assert {r["id"] for r in kept} == {"h", "m5"}          # m5's emoji was in stripped chatter

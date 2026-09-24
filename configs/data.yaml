@@ -4,10 +4,32 @@ buckets: [en, hi, te, cm]
 
 # Frozen split (non-negotiable #6): written once, never regenerated.
 splits_file: data/processed/splits.json
-splits:
-  train: 0.6
-  cal: 0.2
-  test: 0.2
+
+# --- Frozen corpus (src/data/freeze_splits.py; parts-plan Part 13, review2-sprint Day 1) ---
+# python -m src.data.freeze_splits --config configs/data.yaml [--dry-run]
+# Per bucket: clean (clean_artifacts.py) -> length-match machine to the human
+# word-count distribution -> cal_human_per_bucket human rows to `cal` (only from
+# calibration-eligible sources) -> every remaining row by its prompt group,
+# train_share to train and the rest to test. Held-out generators: test only.
+corpus:
+  version: v1
+  path: data/processed/corpus.jsonl
+  generators: [qwen7b]              # v1 is qwen7b only; gemma/mistral join after Review-2
+  seed: 20260924
+  length_bins: 5                    # quantile bins of the bucket's train/test human word counts
+  # Which side length-matching trims (decisions.md 2026-09-24, Part 13). The
+  # distributions must match; which side is cut is set by where the surplus is.
+  # en/hi/te: human train/test is the surplus, so it is cut to the machine
+  # distribution and every clean machine row is kept. cm: the human side cannot
+  # be cut without disturbing the cal-eligibility routing, so machine is cut to
+  # the train/test human distribution. `cal` is drawn BEFORE matching and is
+  # never trimmed.
+  length_match_trim: {en: human, hi: human, te: human, cm: machine}
+  cal_human_per_bucket: 1000
+  train_share: 0.5
+  min_rows_per_side: 500            # a bucket below this on the human OR machine side aborts the freeze
+  discarded_dir: data/raw/discarded
+  length_tokenizer: ai-forever/mGPT # fills length_tokens with the Head B scorer's tokenizer
 
 # Minimum human counts per bucket (locked §5).
 min_human_calibration_per_bucket: 1000

@@ -26,6 +26,9 @@ datasets==5.0.1               # HF streaming loaders (wikimedia/wikipedia, ai4bh
 datasketch==2.0.0             # MinHash LSH near-duplicate filter
 pyarrow==25.0.1               # parquet backend for datasets + results/scores.parquet
 
+# --- Testing ---
+pytest==8.3.4
+
 # --- Config / utilities ---
 pyyaml==6.0.2
 tqdm==4.67.1

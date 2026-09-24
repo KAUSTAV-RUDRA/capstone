@@ -1137,6 +1137,83 @@ selections, caps and rows are untouched.
 
 ---
 
+## 2026-09-24 (later) — Part 13: corpus v1 frozen on qwen7b; cm as a worked example of the thesis
+
+Review-2 sprint Day 1 (`docs/review2-sprint.md`): Part 13 ran on what exists —
+human 8,800 + qwen7b 2,331 — without waiting for gemma/mistral. `splits.json` and
+`corpus.jsonl` are written (hashes in `docs/data/corpus_card.md`) and frozen
+(non-negotiable #6).
+
+### Cleaning — measured, symmetric
+
+`clean_artifacts.py` implements the spec in its docstring. Two changes to that spec,
+both from measuring against the human baseline:
+
+| Change | Why |
+|---|---|
+| hi/te echo patterns do **not** include `in hindi` / `in telugu` | They fire on 6 hi and 16 te human news bylines ("News18 Telugu - …") against 1–2 machine rows. hi/te echo is template leakage only: `<\|im_start\|>`-style tokens and "N words". |
+| Echo also catches **meta responses** and **chat-template leaks** | "Certainly, please provide the topic…", "As an AI…", and one hi row ending `<\|im_start\|>user 请继续用 Hindi…`. Stripping cannot rescue them. Human rate: 0. |
+| `code_mix_ratio` recomputed for every row | qwen7b cm rows arrived with 0.0 against ≥ 0.30 for every human cm row — a perfect class separator in the metadata. Recomputed with `hindi_word_ratio` on the cleaned text, identically for both classes. |
+
+Drop rates: qwen7b en 1.4 %, hi 6.8 %, te **18.0 %** (mostly Devanagari inside Telugu,
+43 rows), cm 7.4 %. Human sources 0–0.8 %, except Indic Wikipedia's stray scripts
+(hi 5.5 %, te 7.1 %, still under the 2 % per-bucket guard). 259 rows dropped, copied to
+`data/raw/discarded/part13_clean_v1.jsonl`.
+
+### Length matching — trim the surplus side
+
+| Decision | Value | Why |
+|---|---|---|
+| Match where the classes meet | Bins are quantiles of the **train/test** human rows; `cal` is drawn first and never trimmed | cal is human-only; test is where a length difference becomes a class signal. Matching against the whole bucket would have left cm's test lengths mismatched (see below). |
+| en, hi, te: **trim human** to the machine distribution | `length_match_trim: {en: human, hi: human, te: human}` | What must hold is that the distributions match, not which side is cut. Trimming machine (the Part 13 draft) cut en 720 → 302 and te 328 → 98; machine is not the surplus. Human train/test is. |
+| cm: **trim machine** | `length_match_trim: {cm: machine}` | cm's human train/test cannot be cut without disturbing the calibration-eligibility routing. |
+| Buckets below 500 machine rows are accepted | `--allow-small-buckets`; final counts below | hi and te start under 500 (qwen7b caps 500/400, before cleaning). Recorded rather than fixed; gemma/mistral add rows after Review-2. |
+
+Final counts: human cal / train / test and machine train / test —
+en 1000/271/272, 359/361 · hi 1000/392/392, 233/233 · te 1000/349/349, 163/165 ·
+cm 1000/596/596, 82/83. Test length medians match in every bucket (human vs machine:
+en 194.5/193, hi 175/172, te 155/156, cm 20/20). 0 prompts straddle train/test.
+
+### Finding — cm's bound is calibrated on chat-register Hinglish
+
+**What happened.** The cm calibration set may draw only from cmu_hinglish_dog + HinGE
+(2026-09-13 (b)): 1,021 eligible rows after cleaning, for 1,000 places. So cal takes
+894 of 913 chat rows and all but 2 HinGE rows, and cm's human **train/test is 98 %
+comi_lingua** — social comments, median 20 words, against a calibration set of chat
+turns joined per conversation (median ~93).
+
+**Why it is a finding, not a caveat.** A split-conformal FPR bound holds for test text
+exchangeable with the calibration text. cm's calibration and test humans come from
+different registers, so the cm bound is a statement about **chat-register Hinglish**,
+and it is not guaranteed on comment-register Hinglish. That is precisely the argument
+this project makes against English-only calibration: a threshold is only as good as the
+match between the population it was calibrated on and the population it is deployed on.
+cm is a worked example of our own thesis, inside our own corpus — the same mechanism
+that makes a single global threshold misfire on Hindi also bounds how far a per-bucket
+threshold reaches within a bucket.
+
+| Decision | Value | Why |
+|---|---|---|
+| Source restriction and 1,000 floor **unchanged** | Option (a) | They are the guarantee. Admitting comi_lingua would put possibly-machine text in cal; shrinking cal below 1,000 weakens the quantile. |
+| cm's bound is stated as chat-register | Wherever cm appears: corpus card, T1/T5/T6 captions, paper | Honest scope of the guarantee. |
+| cm test FPR is **reported as measured** on comments | T5 | The gap between the nominal α and cm's empirical test FPR is itself evidence for the calibration–deployment-match argument, and goes in the paper as such. |
+
+**The same mechanism, mildly, in en/hi/te.** Trimming human train/test to the machine
+length distribution makes test humans a length-reweighted sample relative to cal
+(median words, cal vs test: en 208 vs 194.5, hi 159 vs 175, te 155 vs 155). Any
+per-bucket test FPR is therefore read against a slightly shifted population. The
+trimmed human rows are not lost: their ids are in `splits.json` under
+`excluded.length_match` with prompt groups assigned, so an unmatched human-test FPR can
+be computed from `data/raw/human/` as a robustness check in T5.
+
+**Consequence for later generators.** New machine rows take their prompt's recorded
+group (`prompt_groups` in `splits.json`, one per prompt including those whose human is
+in cal), so adding gemma/mistral does not need `splits.json` changed. How rows are
+added to a frozen corpus (a v2 file keyed on the same groups) is decided when that
+happens.
+
+---
+
 ## Decisions still open (fill as resolved)
 
 - [ ] Phase 0.1 — what "patent" means (disclosure / IPR-cell / IPO provisional).

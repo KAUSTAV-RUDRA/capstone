@@ -5,6 +5,37 @@ Newest entries at the top.
 
 ---
 
+## 2026-09-24 — Part 13: corpus v1 frozen (qwen7b)
+
+Review-2 sprint Day 1. `clean_artifacts.py` and `freeze_splits.py` implemented;
+`splits.json` + `corpus.jsonl` written and frozen on human 8,800 + qwen7b 2,331.
+Decisions and the cm finding: `docs/decisions.md` 2026-09-24 (later). Counts,
+hashes and cleaning table: `docs/data/corpus_card.md` §0.
+
+- **Cleaning** drops 259 rows (qwen7b en 1.4 %, hi 6.8 %, te 18.0 %, cm 7.4 %; human
+  0–0.8 %, Indic Wikipedia 5.5–7.1 %). Caught and fixed on the way: qwen7b cm rows
+  carried `code_mix_ratio = 0.0` against ≥ 0.30 for human, a perfect class separator
+  in metadata; recomputed for both classes.
+- **First dry run stopped the freeze**: trimming machine to human lengths left en 302,
+  hi 269, te 98, cm 290 machine rows. Resolved by trimming whichever side is the
+  surplus: human for en/hi/te, machine for cm.
+- **Final (human cal/train/test · machine train/test)**: en 1000/271/272 · 359/361;
+  hi 1000/392/392 · 233/233; te 1000/349/349 · 163/165; cm 1000/596/596 · 82/83.
+  Test length medians match in every bucket; 0 prompts straddle train/test.
+- **Finding**: cm calibration is chat-register (cmu_hinglish_dog) while cm test is
+  98 % comments (comi_lingua), so cm's bound holds for chat-register Hinglish. It's a
+  worked example of the paper's calibration–deployment-match argument.
+- `pytest` added to requirements.txt; 10 data tests pass (freeze guard, cal
+  eligibility, cal floor, length matching both ways, symmetric drop rules).
+
+**Verify:** `python -m src.data.freeze_splits --config configs/data.yaml` → refuses
+with `FileExistsError` (frozen). `sha256sum data/processed/splits.json` →
+`1a71fa2f…7471`. `pytest tests/data`.
+
+**Next:** Day 2 — score headA / headB / headB_word on the frozen corpus.
+
+---
+
 ## 2026-09-23 — gemma: the hi gate abort, per-generator compliance, and all four buckets passing
 
 A 110-minute gemma run aborted at the `hi` gate (median 1.48 against a 1.25

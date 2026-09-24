@@ -73,18 +73,35 @@ is the accepted cost of a rule that catches 23 real leaks against a human rate o
 3 in 2,200. For contrast, the discarded v0 rows scored emoji 28 and echo 7 — the
 old regime leaked less prompt wording because it was barely following the prompt.
 
-Open
-----
+Stage 1 in detail (measured on qwen7b, 2026-09-24)
+--------------------------------------------------
+- **Preamble**: a leading "Certainly!" / "Of course." / "Absolutely!" (44 qwen7b
+  en rows open this way), a "Here is a short passage of about 150 words on …:"
+  line, and "Sure, I can …" sentences. A bare leading "Sure," is **kept**: in cm it
+  is in character ("Sure, buddy! Abhi main khel rha hoon…").
+- **Markdown**: bold/italic markers (``**``, ``__``) and header hashes. 14 qwen7b
+  rows carry them. List numbering is left alone; it is also human.
+- **cm**: :func:`src.data.build_human_corpus.clean_informal`, the normalisation
+  every human cm passage already went through (corpus card §4 carry-over).
+
+Instruction echo also catches **meta responses** that answer the instruction
+instead of the topic ("Certainly, please provide the topic you would like me to
+write about", "As an AI, I don't…") and **chat-template leaks** (one qwen7b hi row
+ends in ``<|im_start|>user 请继续用 Hindi 回答我…``). Stripping cannot rescue either.
+
+Resolved
+--------
 Dropping a machine row leaves its prompt-matched human passage without a
-counterpart. Whether the pair is dropped with it, or the human row is kept, is
-P2's call at split time (docs/project-context-master.md §6, §9) and is not
-decided here.
+counterpart. The human row is **kept** (review2-sprint Day 1: every clean human
+row goes to cal or train/test); pairs are not dropped together.
 """
 from __future__ import annotations
 
 import re
-
-from src.data.schema import Sample
+import unicodedata
+from collections import Counter, defaultdict
+from collections.abc import Iterable
+from typing import Any
 
 #: Trailing assistant chatter: an offer to continue, or a "hope this helps" sign-off,
 #: as a WHOLE final line. gemma ends about 3 in 24 cm passages this way ("Let me know
@@ -131,27 +148,167 @@ def strip_boilerplate(text: str) -> str:
     return "\n".join(lines).rstrip()
 
 
-def clean_text(text: str) -> tuple[str, float]:
-    """Strip artefacts from one text.
+#: Leading assistant preamble, removed from the start of a text. Ordered: the
+#: "Here is …:" form first, since it often follows an interjection.
+_PREAMBLE: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^\s*(?:(?:sure|certainly|of course|absolutely)[!,.]?\s+)?"
+               r"here(?:'s| is| are)\b[^\n:]{0,150}:\s*", re.I),
+    re.compile(r"^\s*sure[!,.]\s+i(?: can|'d be happy to| will)\b[^.!\n]*[.!]\s+", re.I),
+    re.compile(r"^\s*(?:certainly|of course|absolutely)[!.]\s+", re.I),
+    re.compile(r"^\s*(?:ज़रूर|जरूर|निश्चित रूप से)[!।,]\s*"),
+    re.compile(r"^\s*ఖచ్చితంగా[!.,]\s*"),
+)
+
+_MD_EMPHASIS = re.compile(r"\*\*|__")
+_MD_HEADER = re.compile(r"^[ \t]*#{1,6}[ \t]+", re.M)
+
+#: Rule 2, per bucket. Every pattern was measured against that bucket's 2,200
+#: human rows before it was used (see the module docstring for the rule).
+#: ``<|…|>`` is a chat-template token leaking into the output, in any bucket.
+_TEMPLATE_LEAK = r"<\|[a-z_]+\|>"
+ECHO_PATTERNS: dict[str, re.Pattern[str]] = {
+    "en": re.compile(_TEMPLATE_LEAK + r"|\bprovide the topic\b|\babout \d+ words\b"
+                     r"|\bthe given instruction\b|\bas an ai\b|\bcontinuing naturally\b", re.I),
+    # Not "in Hindi"/"in Telugu": they match 6 hi and 16 te human news bylines
+    # ("News18 Telugu - …", "… in Hindi (करंट अफेयर्स)") against 1-2 machine rows.
+    "hi": re.compile(_TEMPLATE_LEAK + r"|\b\d+ words\b", re.I),
+    "te": re.compile(_TEMPLATE_LEAK + r"|\b\d+ words\b|\bdo not stop early\b", re.I),
+    "cm": re.compile(_TEMPLATE_LEAK + r"|\broman\b|hinglish|\bemoji", re.I),
+}
+
+#: Rule 4. Scripts a bucket may carry; any letter from a script in STRAY_SCRIPTS
+#: that is not allowed here drops the row.
+ALLOWED_SCRIPTS: dict[str, frozenset[str]] = {
+    "en": frozenset({"LATIN"}),
+    "cm": frozenset({"LATIN"}),
+    "hi": frozenset({"LATIN", "DEVANAGARI"}),
+    "te": frozenset({"LATIN", "TELUGU"}),
+}
+#: First word of the Unicode character name -> script. Greek is absent on
+#: purpose: human en uses it for symbols (α, π) and it is not a tokenizer artefact.
+STRAY_SCRIPTS: frozenset[str] = frozenset({
+    "DEVANAGARI", "TELUGU", "CYRILLIC", "HANGUL", "CJK", "HIRAGANA", "KATAKANA",
+    "ARABIC", "BENGALI", "GUJARATI", "GURMUKHI", "KANNADA", "MALAYALAM", "ORIYA",
+    "TAMIL", "THAI", "HEBREW",
+})
+
+#: Rule guard: a symmetric rule dropping more than this share of a bucket's HUMAN
+#: rows is matching the bucket, not the defect, and must be re-measured.
+HUMAN_DROP_GUARD = 0.02
+
+DROP_RULES: tuple[str, ...] = ("emoji", "echo", "truncated", "stray_script", "empty")
+
+
+def clean_text(text: str, bucket: str) -> tuple[str, float]:
+    """Stage 1: strip artefacts from one text, human or machine alike.
 
     Args:
-        text: Raw machine (or human) text.
+        text: Raw text.
+        bucket: Language bucket; ``cm`` also gets ``clean_informal``.
 
     Returns:
-        ``(cleaned_text, fraction_stripped)``.
+        ``(cleaned_text, fraction_of_characters_stripped)``.
     """
-    # TODO(phase-2 step-2.1.4): remove preambles/refusals/markdown.
-    raise NotImplementedError
+    from src.data.build_human_corpus import clean_informal   # heavy module; import on use
+
+    out = strip_boilerplate(text)
+    for pattern in _PREAMBLE:
+        out = pattern.sub("", out, count=1)
+    out = _MD_HEADER.sub("", _MD_EMPHASIS.sub("", out))
+    if bucket == "cm":
+        out = clean_informal(out)
+    out = out.strip()
+    stripped = 1.0 - len(out) / len(text) if text else 0.0
+    return out, max(0.0, stripped)
 
 
-def clean_samples(samples: list[Sample]) -> tuple[list[Sample], dict[str, float]]:
-    """Clean a list of samples and return per-bucket stripped-percentage stats.
+def stray_scripts(text: str, bucket: str) -> set[str]:
+    """Scripts in ``text`` that ``bucket`` does not use (rule 4)."""
+    allowed = ALLOWED_SCRIPTS[bucket]
+    found: set[str] = set()
+    for ch in set(text):
+        if not ch.isalpha():
+            continue
+        script = unicodedata.name(ch, "").split(" ", 1)[0]
+        if script in STRAY_SCRIPTS and script not in allowed:
+            found.add(script)
+    return found
 
-    Args:
-        samples: Samples to clean in place (returned as new list).
+
+def drop_reasons(row: dict[str, Any], cleaned: str) -> list[str]:
+    """Stage 2: every drop rule ``row`` fails, judged on its stripped text."""
+    from src.data.generate import has_emoji   # generate imports this module
+
+    bucket = row["language"]
+    reasons: list[str] = []
+    if has_emoji(cleaned):
+        reasons.append("emoji")
+    if ECHO_PATTERNS[bucket].search(cleaned):
+        reasons.append("echo")
+    if row.get("truncated"):
+        reasons.append("truncated")
+    if stray_scripts(cleaned, bucket):
+        reasons.append("stray_script")
+    if not cleaned.split():
+        reasons.append("empty")
+    return reasons
+
+
+def row_source(row: dict[str, Any]) -> str:
+    """Reporting key: the human corpus source, or the generator for machine rows."""
+    return row.get("generator") or row.get("source") or "unknown"
+
+
+def clean_rows(rows: Iterable[dict[str, Any]], *, enforce_guard: bool = True
+               ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+    """Strip then drop, identically for human and machine rows.
+
+    Each returned row is a copy with ``text`` replaced by the cleaned text and
+    ``length_words`` recounted; dropped rows also carry ``drop_reasons``.
 
     Returns:
-        ``(cleaned_samples, {bucket: mean_fraction_stripped})``.
+        ``(kept, dropped, report)``. ``report["by_source"]`` maps
+        ``(bucket, source)`` to ``{"n", "dropped", "stripped_rows", rule: count}``.
+
+    Raises:
+        ValueError: If a symmetric rule drops more than :data:`HUMAN_DROP_GUARD`
+            of a bucket's human rows (``enforce_guard``).
     """
-    # TODO(phase-2 step-2.1.4): apply clean_text across the corpus.
-    raise NotImplementedError
+    kept: list[dict[str, Any]] = []
+    dropped: list[dict[str, Any]] = []
+    by_source: dict[tuple[str, str], Counter] = defaultdict(Counter)
+    human_rule: dict[str, Counter] = defaultdict(Counter)
+    for row in rows:
+        cleaned, frac = clean_text(row["text"], row["language"])
+        out = dict(row, text=cleaned, length_words=len(cleaned.split()))
+        reasons = drop_reasons(row, cleaned)
+        stats = by_source[(row["language"], row_source(row))]
+        stats["n"] += 1
+        stats["stripped_rows"] += frac > 0
+        for reason in reasons:
+            stats[reason] += 1
+            if row["label"] == 0:
+                human_rule[row["language"]][reason] += 1
+        if reasons:
+            stats["dropped"] += 1
+            dropped.append(dict(out, drop_reasons=reasons, raw_text=row["text"]))
+        else:
+            kept.append(out)
+    human_n = Counter(r["language"] for r in kept + dropped if r["label"] == 0)
+    breaches = [f"{b} {rule}: {n}/{human_n[b]} human rows"
+                for b, rules in human_rule.items() for rule, n in rules.items()
+                if n > HUMAN_DROP_GUARD * human_n[b]]
+    if breaches and enforce_guard:
+        raise ValueError("drop rule mis-tuned (over the human guard): " + "; ".join(breaches))
+    return kept, dropped, {"by_source": dict(by_source), "guard_breaches": breaches}
+
+
+def format_report(report: dict[str, Any]) -> str:
+    """Per bucket x source: rows, % dropped, and the count behind each rule."""
+    lines = [f"{'bucket':6} {'source':18} {'rows':>5} {'dropped':>8} {'%':>6}  "
+             + " ".join(f"{r:>12}" for r in DROP_RULES) + f" {'stripped':>9}"]
+    for (bucket, source), s in sorted(report["by_source"].items()):
+        pct = 100.0 * s["dropped"] / s["n"] if s["n"] else 0.0
+        lines.append(f"{bucket:6} {source:18} {s['n']:>5} {s['dropped']:>8} {pct:>5.1f}%  "
+                     + " ".join(f"{s[r]:>12}" for r in DROP_RULES) + f" {s['stripped_rows']:>9}")
+    return "\n".join(lines)
