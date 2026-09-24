@@ -5,6 +5,93 @@ Newest entries at the top.
 
 ---
 
+## 2026-09-24 — Day 4: fusion, calibration, abstention, T1/T2/T5/T6/F1/F2 (headC excluded)
+
+Review-2 sprint Day 4, all from `results/scores.parquet` (qwen7b only), no GPU.
+
+**Head C excluded from fusion.** Diagnosed first, per the sprint plan: Head C
+(MuRIL + per-bucket logistic) scores 1.000 AUROC on en/hi/te, 0.927 on cm —
+implausibly higher than Head A (0.91-0.99) or Head B (0.12-0.86). Length
+(single-feature AUROC 0.50-0.57) and domain (0.50-0.60) are ruled out — the
+corpus's length/domain matching held. But a plain TF-IDF unigram+bigram
+bag-of-words classifier, no embeddings at all, tracks Head C almost exactly
+(0.99-1.00 en/hi/te, 0.90 cm), and the embedding's PC1 correlates with the
+label directly (|r| 0.75-0.90). Only one generator (qwen7b) is scored so far:
+**Head C is fingerprinting that generator's word choices, not detecting a
+generalisable AI-vs-human signal** — non-negotiable #4's exact warning.
+Excluded from the adopted fusion; kept standalone in T1/T2 and as a reference
+"A+B+C" fusion to show numerically how much of its lift is the shortcut.
+`scripts/diagnose_headc.py` → `docs/results/headc_diagnosis.md`.
+
+**Built:** `src/fusion/fuser.py` (logistic regression, standardised features
+so coefficients are comparable, headA+headB+bucket-one-hot),
+`src/calibration/temperature.py` (per-bucket, fit on train — the frozen `cal`
+split is human-only and carries no label variation to fit against),
+`src/calibration/conformal.py` (split-conformal quantile, per-bucket +
+pooled-global for comparison), `src/calibration/abstention.py` (MACHINE >
+tau_0.01, HUMAN < calibration median, else ABSTAIN, plus a 30-100% coverage
+sweep), `src/eval/metrics.py`, `src/eval/risk_coverage.py`,
+`src/eval/fairness_audit.py`, `src/eval/ablation.py`. One shared fit-once
+cache, `src/eval/pipeline.py`, so every downstream table script stays
+independently runnable and consistent.
+
+**Headline numbers:**
+- **T1**: fused (A+B) beats every baseline in every bucket — AUROC en 0.985,
+  hi 0.991, te 0.991, cm 0.904, against the best baseline (perplexity) at
+  0.915/0.816/0.847/0.711.
+- **T2**: `+temperature`'s AUROC/F1 are IDENTICAL to `A+B` in every bucket by
+  construction (monotonic transform); its payoff is ECE (T6), not
+  discrimination. `+abstain` lands 58-65% coverage at 98.7-99.2% accuracy and
+  FPR under 3% in every bucket.
+- **T5**: the global pooled threshold BREAKS its own FPR guarantee in 4
+  cases (en/hi at alpha=0.01, en/cm at alpha=0.05) — the per-bucket threshold
+  never does, the core empirical case for non-negotiable #3. en's L1/L2 split
+  (writer_L1_band) reads indian (L2 proxy) FPR *lower* than general (L1) at
+  both alphas — opposite the native/non-native bias this project is
+  motivated by (§2). Single-generator, flagged not to be over-claimed.
+  **Not computable this sitting:** the unmatched-human robustness check
+  (the length_match/clean-excluded ids in `splits.json`) needs Head B (GPU)
+  scored on text that was never scored — written as NaN with a note, not
+  fabricated.
+- **T6**: ECE before→after temperature: en 0.037→0.036, hi 0.033→0.035,
+  te 0.031→0.035, cm 0.081→0.070.
+- **F2**: argues AGAINST fertility explaining Head B's hi/te collapse —
+  Qwen2.5-0.5B (fastdetectgpt_en's scorer) has WORSE fertility than mGPT on
+  hi/te yet stays above chance (0.728, 0.555), while mGPT — better relative
+  fertility — drops BELOW chance (0.187, 0.120). The inversion is
+  mGPT-specific, not a fragmentation artefact.
+
+Also fixed a real inconsistency along the way: `src/eval/ablation.py` still
+had the old 5-config `ABLATION_CONFIGS` from before this sprint's 8-config
+spec; moved the real T2 logic there (was duplicated inline in
+`experiments/exp08_ablation.py`) and updated the constant so the two don't
+drift apart again. `experiments/exp07_fairness.py` now calls
+`src.eval.fairness_audit`'s primitives instead of recomputing FPR inline.
+
+**Full writeup:** `docs/results/README.md` (one section per table, all
+numbers, known limitations). Tests added for every new module:
+`tests/calibration/{test_conformal,test_temperature,test_abstention}.py`,
+`tests/eval/{test_metrics,test_fairness_audit,test_risk_coverage,test_ablation}.py`,
+`tests/fusion/test_fuser.py` — 27 passing.
+
+**Verify:**
+```
+python -m experiments.exp01_baselines --config configs/default.yaml   # T1
+python -m experiments.exp08_ablation --config configs/default.yaml    # T2
+python -m experiments.exp07_fairness --config configs/default.yaml    # T5
+python -m experiments.exp05_abstention --config configs/default.yaml  # T6, F1
+python -m experiments.exp09_fertility_curvature --config configs/default.yaml  # F2
+pytest tests/calibration tests/eval tests/fusion   # 27 passed, 1 pre-existing
+                                                    # unrelated failure (test_explain.py)
+```
+
+**Next:** this is all qwen7b-only. gemma/mistral (seen) and llama/phi
+(held-out, non-negotiable #4) still need scoring before T1/T2/headC's
+exclusion can be treated as settled rather than provisional; the unmatched-
+human robustness check needs a GPU sitting.
+
+---
+
 ## 2026-09-24 — Head A scored: first real result
 
 Review-2 sprint Day 2, Head A only (no GPU; headB / headB_word next sitting).
