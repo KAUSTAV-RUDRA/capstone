@@ -1008,3 +1008,34 @@ after `pip install -r requirements.txt` then `python manage.py migrate` and
 
 **Next:** Phase 1 Day 1 tasks — Phase 0 emails (P1), dataset downloads (P2),
 run `scripts/check_hardware.py` and post output (P3).
+
+## 2026-09-24 (night) — Day 2 GPU half: headB + headB_word scored, corpus-wide
+
+Fast-DetectGPT curvature (`src/features/curvature.py`), scorer mGPT-1.3B, fp16 CUDA.
+One forward pass yields both `headB` (token-level) and `headB_word` (per-word
+standardised, Patent 2) into `results/scores.parquet`, all 8896 rows.
+
+Test AUROC: en 0.859/0.832, cm 0.661/0.635, hi 0.187/0.192, te 0.120/0.122
+(headB/headB_word). hi and te are inverted, not just weak — diagnosed as a
+likely pretraining-contamination effect specific to low-resource-language
+human corpora (both available hi/te human sources, IndicCorp and Wikipedia,
+score the same way relative to qwen7b; en's three sources don't). Sign is
+**not** flipped — fusion (Day 4) handles it. Full writeup and the evidence
+table: `docs/decisions.md` 2026-09-24 (night).
+
+headB_word is a negative result: indistinguishable from headB everywhere,
+including on the worst-fragmentation buckets (te, hi). Patent 2 needs
+attention — flagged for P2.
+
+Also fixed mid-run: a real CUDA OOM at row 216/6784 from allocator
+fragmentation (not true VRAM usage — card was idle right after). Token-budget
+batching, `empty_cache()` per group, and an OOM-safe bisecting retry; re-run
+completed clean.
+
+**Verify:** `python -m src.eval.score --report headA,headB,headB_word`;
+`pytest tests/features/test_curvature.py` → 9 passed.
+
+**Next:** Day 3 — headC (MuRIL), ppl and binoculars baselines (Qwen2.5-0.5B),
+and `fastdetectgpt_en` — the decisive test for whether the hi/te inversion is
+scorer-specific (different pretraining) or a property of curvature on Indic
+text generally. Prioritise `fastdetectgpt_en` first.

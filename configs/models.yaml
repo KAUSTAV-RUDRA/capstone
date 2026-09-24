@@ -51,3 +51,27 @@ head_a:
   C: 1.0
   class_weight: balanced                 # train is not 1:1 (cm 596 human : 82 machine)
   cv_folds: 5                            # per-bucket CV AUROC on train = the instability report
+
+# --- Head B (src/features/curvature.py; review2-sprint Day 2, parts-plan Part 15) ---
+# python -m src.eval.score --column headB      (then --column headB_word: same cache)
+# One mGPT forward pass yields both columns: headB = token-level Fast-DetectGPT,
+# headB_word = per-word standardised curvature (Patent 2). Both cached per row.
+head_b:
+  scorer: ai-forever/mGPT
+  device: cuda                           # fp16 weights; softmax statistics in fp32
+  load_in_8bit: false
+  batch_size: 8
+  # mGPT's full context. At 512, 66 % of hi and 100 % of te texts were truncated
+  # (te median 988 mGPT tokens); 2048 scores >99 % of texts whole.
+  max_length: 2048
+  vocab_chunk_positions: 512             # positions per fp32 softmax over the 100k vocab
+  word_var_floor: 1.0e-4                 # nats^2; guards near-deterministic words in headB_word
+  # rows * max(length) per sub-batch. Measured: 8 rows x 2048 tokens peaked at
+  # 7.88 GiB of the 7.9956 GiB card (transformer-body attention is dense over
+  # padding, not just real tokens); 8192 brought that isolated case down to
+  # 5.3 GiB. Lowered further to 6144 after a sustained run OOM'd at row 216/6784
+  # from allocator fragmentation, not true usage (card was idle right after) -
+  # see docs/decisions.md. CurvatureScorer also empties the cache every group
+  # and bisects a group that OOMs anyway.
+  max_batch_tokens: 6144
+  stats_cache: results/features/curvature_mgpt.parquet

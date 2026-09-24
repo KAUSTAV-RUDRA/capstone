@@ -165,13 +165,75 @@ def score_headA(texts, rows, ctx):
     return head.predict(X, [r["language"] for r in rows]).tolist()
 
 
-@register("headB", "Head B: Fast-DetectGPT curvature, scorer ai-forever/mGPT (Part 15)")
-def score_headB(texts, rows, ctx):
-    raise NotImplementedError(
-        "headB lands in parts-plan Part 15: Fast-DetectGPT analytic curvature with "
-        "ai-forever/mGPT (LOCKED 2026-09-13 on tokenizer fertility) fp16 on CUDA. "
-        "The mechanism already exists in src/baselines/fast_detectgpt.py."
-    )
+#: Columns served by one mGPT pass, in the order CurvatureScorer.stats returns them.
+CURVATURE_COLUMNS = ("headB", "headB_word")
+
+
+def curvature_features(rows: Sequence[dict[str, Any]], cfg: dict[str, Any],
+                       max_minutes: float = 0, device: str | None = None) -> dict[str, list[float]]:
+    """Both Head B statistics for ``rows``, id -> [headB, headB_word], cached on disk.
+
+    One forward pass gives both, so they are computed together and cached like the
+    stylometric features: journalled as they complete, resumable, folded into
+    ``stats_cache``. Rows are length-sorted so a batch pads little.
+    """
+    import pandas as pd
+
+    from src.features.curvature import CurvatureScorer
+
+    cache = Path(cfg["stats_cache"])
+    journal = cache.parent / f".{cache.stem}.jsonl"
+    have: dict[str, list[float]] = {}
+    if cache.exists():
+        table = pd.read_parquet(cache)
+        have = dict(zip(table["id"], table[list(CURVATURE_COLUMNS)].to_numpy().tolist()))
+    missing = [r for r in rows if r["id"] not in have]
+    if missing:
+        scorer = CurvatureScorer(cfg["scorer"], device=device or cfg.get("device", "cuda"),
+                                 load_in_8bit=bool(cfg.get("load_in_8bit", False)), config=cfg)
+        scorer.load()
+        log.info("headB scorer %s on %s, max_length %d", cfg["scorer"], scorer.model.device, scorer.max_length)
+        missing.sort(key=lambda r: len(r["text"]))
+
+        def process(batch: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+            S = scorer.stats([r["text"] for r in batch])
+            return [{"id": r["id"], **dict(zip(CURVATURE_COLUMNS, map(float, s)))} for r, s in zip(batch, S)]
+
+        report = run_resumable(missing, id_of=lambda r: r["id"], process_batch=process,
+                               out_path=journal, batch_size=int(cfg.get("batch_size", 8)),
+                               max_minutes=max_minutes, label="rows (curvature)")
+        if report.errors:
+            raise RuntimeError(f"curvature scoring failed: {report.errors[0]}")
+        for entry in read_jsonl(journal, skip_bad_lines=True):
+            have[entry["id"]] = [entry[c] for c in CURVATURE_COLUMNS]
+        still = [r["id"] for r in rows if r["id"] not in have]
+        if still:
+            raise RuntimeError(f"{len(still)} rows still lack curvature (time budget hit?); re-run to resume")
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        table = pd.DataFrame(list(have.values()), columns=list(CURVATURE_COLUMNS))
+        table.insert(0, "id", list(have))
+        table.to_parquet(cache, index=False)
+        journal.unlink(missing_ok=True)
+    return {r["id"]: have[r["id"]] for r in rows}
+
+
+def _curvature_column(name: str) -> ColumnFn:
+    k = CURVATURE_COLUMNS.index(name)
+
+    def fn(texts, rows, ctx):
+        cache = ctx.cache.setdefault("curvature", {})
+        missing = [r for r in rows if r["id"] not in cache]          # rows not prepared up front
+        if missing:
+            cache.update(curvature_features(missing, ctx.models_config["head_b"], ctx.max_minutes, ctx.device))
+        return [cache[r["id"]][k] for r in rows]
+
+    return fn
+
+
+register("headB", "Head B: Fast-DetectGPT token-level curvature, scorer ai-forever/mGPT (Part 15)")(
+    _curvature_column("headB"))
+register("headB_word", "Head B, word level: per-word standardised curvature, mGPT (Patent 2)")(
+    _curvature_column("headB_word"))
 
 
 @register("headC", "Head C: MuRIL mean-pooled embeddings -> per-bucket logistic head (Part 16)")
@@ -269,6 +331,8 @@ def main(argv: list[str] | None = None) -> None:
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--column", help=f"one of: {', '.join(COLUMN_REGISTRY)}")
     parser.add_argument("--list", action="store_true", help="list registered columns and exit")
+    parser.add_argument("--report", metavar="COLS",
+                        help="comma-separated scored columns: print their per-bucket test AUROC side by side and exit")
     parser.add_argument("--max-minutes", type=float, default=0)
     parser.add_argument("--only-attacked", action="store_true", help="score only data/processed/attacked.jsonl")
     parser.add_argument("--config", default="configs/models.yaml")
@@ -287,6 +351,10 @@ def main(argv: list[str] | None = None) -> None:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
+    if args.report:
+        cols = [c.strip() for c in args.report.split(",") if c.strip()]
+        print(format_comparison({c: auroc_by_bucket(Path(args.scores), Path(args.corpus), c) for c in cols}))
+        return
     if args.list or not args.column:
         print(f"{'column':<20}description")
         for name, doc in COLUMN_DOCS.items():
@@ -312,6 +380,9 @@ def main(argv: list[str] | None = None) -> None:
     column_fn = COLUMN_REGISTRY[args.column]
     if args.column == "headA":            # fit once, up front, not inside the first batch
         ctx.cache["headA"] = fit_headA(ctx)
+    elif args.column in CURVATURE_COLUMNS:  # one mGPT pass serves both columns, cached
+        ctx.cache["curvature"] = curvature_features(rows, ctx.models_config["head_b"],
+                                                    args.max_minutes, args.device)
 
     def process_batch(batch: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
         values = column_fn([r["text"] for r in batch], batch, ctx)
@@ -378,6 +449,20 @@ def format_auroc(table: list[dict[str, Any]], head: Any = None) -> str:
             mean, std = cv[t["bucket"]]
             line += f"  {c.get('human', 0):>4}/{c.get('machine', 0):<4}  {mean:.3f} ± {std:.3f}"
         lines.append(line)
+    return "\n".join(lines)
+
+
+def format_comparison(tables: dict[str, list[dict[str, Any]]]) -> str:
+    """Several columns' per-bucket AUROC side by side, one row per bucket."""
+    cols = list(tables)
+    by = {c: {t["bucket"]: t for t in tables[c]} for c in cols}
+    buckets = sorted({b for c in cols for b in by[c]})
+    lines = [f"\n{'bucket':6} {'test h/m':>9}  " + "  ".join(f"{c + ' AUROC [95% CI]':>27}" for c in cols)]
+    for b in buckets:
+        first = next(by[c][b] for c in cols if b in by[c])
+        cells = [f"{by[c][b]['auroc']:.3f} [{by[c][b]['ci_lo']:.3f}, {by[c][b]['ci_hi']:.3f}]"
+                 if b in by[c] else "-" for c in cols]
+        lines.append(f"{b:6} {first['human']:>4}/{first['machine']:<4}  " + "  ".join(f"{x:>27}" for x in cells))
     return "\n".join(lines)
 
 

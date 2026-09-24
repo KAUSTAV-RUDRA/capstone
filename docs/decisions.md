@@ -1230,6 +1230,110 @@ only; see docs/progress.md 2026-09-24.
 
 ---
 
+## 2026-09-24 (night) — headB scored: a finding, not a bug — curvature inverts on hi/te
+
+**Result (test AUROC, qwen7b, mGPT fp16 CUDA):**
+
+| bucket | headA | headB | headB_word |
+|---|---|---|---|
+| en | 0.991 | 0.859 [0.832, 0.889] | 0.832 [0.801, 0.862] |
+| cm | 0.910 | 0.661 [0.594, 0.728] | 0.635 [0.566, 0.703] |
+| hi | 0.984 | **0.187** [0.153, 0.222] | 0.192 [0.159, 0.229] |
+| te | 0.989 | **0.120** [0.090, 0.152] | 0.122 [0.092, 0.153] |
+
+headB is below 0.5 in hi and te — inverted, not merely weak. This was the sprint's
+one stop condition ("a column's AUROC is below 0.5 — sign error"), and it was
+checked: same code, same sign convention, works correctly on en (0.859) and cm
+(0.661, weak but right-signed). Confirmed against a full-logits reference in
+`tests/features/test_curvature.py::test_padded_batch_matches_single_rows_and_reference`.
+Not a bug — see the diagnostic below. **Sign is NOT flipped for hi/te**; the
+fused head (Day 4) learns weights per bucket and a consistent inverted signal
+is still usable there. Do not hand-correct it.
+
+**Diagnostic — human headB by source, within-bucket, train+test:**
+
+| bucket | source | n | mean | vs. machine mean |
+|---|---|---|---|---|
+| en | hc3 | 169 | −0.724 | machine +0.701 (**above**, correct direction) |
+| en | samanantar_en | 254 | −1.105 | — |
+| en | wikipedia | 120 | −0.795 | — |
+| hi | indiccorp_v2 | 565 | −1.565 | machine −3.889 (**below**, inverted) |
+| hi | wikipedia | 219 | −2.398 | — |
+| te | indiccorp_v2 | 546 | −5.124 | machine −9.473 (**below**, inverted) |
+| te | wikipedia | 152 | −5.998 | — |
+
+Within-bucket spread across human sources (0.38 en, 0.83 hi, 0.87 te) is small next
+to the human-vs-machine gap in every bucket (1.4 en, 2.3 hi, 3.5–4.3 te) — which
+human corpus you pick barely moves the number. What differs is *direction*: in en
+every available human source sits below qwen7b's mean (expected — machine text
+scores as more machine-like); in hi and te, **both** available human sources
+(IndicCorp v2 and Wikipedia — there is no third option at this corpus size) sit
+above qwen7b's mean. The inversion isn't one contaminated source contaminating the
+bucket; it's that every real-world hi/te human corpus available to this project
+behaves the same way against mGPT.
+
+**Working hypothesis:** curvature-based detection assumes the human calibration
+text is *outside* the scorer's own pretraining distribution, so the scorer finds
+genuinely-human text more "surprising" than the model's own likely continuations.
+For en, pretraining data is broad enough that no single available corpus (HC3,
+Samanantar, Wikipedia) dominates what shaped mGPT's English distribution. For hi
+and te, IndicCorp and Wikipedia-derived text *are* plausibly a substantial fraction
+of what a multilingual LM this size was trained on for those languages — there
+isn't much else at scale. If so, mGPT finds real hi/te text unsurprising not
+because it's human, but because it has effectively seen it (or its close relatives)
+before; qwen7b's Hindi/Telugu output, despite being machine-written, is a
+different model's distribution and reads as comparatively more surprising to
+mGPT. This is not verified against mGPT's actual training manifest (not public);
+it is the explanation consistent with every number above and with nothing else
+we've checked.
+
+**Why this matters beyond this dataset:** the project's own provenance rule (human
+calibration text predates the scorer / is out-of-distribution, so an LLM can't
+have memorised it) is usually enforced by picking recent or held-out text. For
+low-resource languages that rule runs into a wall: the small set of large hi/te
+corpora that exist at all (IndicCorp, Wikipedia, CommonCrawl-derived) *are*, in
+practice, close to what any sizable multilingual LM was pretrained on for that
+language, because there is little else. There may be no way to build a hi/te
+human calibration set that is simultaneously (a) large enough (≥1000/bucket,
+locked §5) and (b) provably outside mGPT's pretraining. To our knowledge this
+tension is unreported in the curvature-detection literature (Fast-DetectGPT,
+Binoculars, DetectGPT are evaluated almost entirely on English/high-resource
+text). Candidate for the paper's limitations section and worth checking whether
+it independently motivates Patent 1's abstention gate: if a bucket's curvature
+head is structurally unreliable, that's exactly the case abstention exists for.
+
+**headB_word — negative result.** headB_word ≈ headB everywhere (en 0.832 vs
+0.859, te 0.122 vs 0.120, hi 0.192 vs 0.187, cm 0.635 vs 0.661) — word-level
+aggregation changes nothing measurable, including on te/hi where tokenizer
+fertility is worst (6.3, 3.6 tokens/word) and a fragmentation-robustness
+argument would predict the biggest gap. **Patent 2's central claim — that
+per-word standardisation recovers signal fragmentation destroys — does not
+hold on this evidence.** Recorded as a finding, not hidden: `headB_word` stays
+in the registry and the parquet (it's cheap, one extra column from the same
+forward pass), but Patent 2 needs a different central claim or needs to be
+retargeted before the December filing. Flagged for P2, who owns Patent 2.
+
+**Engineering, same session:**
+- `max_length` 512 → 2048: at 512, 66% of hi and 100% of te texts were truncated
+  (te median is 988 mGPT tokens). 2048 scores >99% of texts whole.
+- Batching is by **token budget** (`max_batch_tokens`), not row count: `8 rows x
+  2048 tokens` peaked at 7.88 GiB of the 7.9956 GiB card in isolation. A
+  sustained run still hit a genuine CUDA OOM at row 216/6784 with the token
+  budget in place — allocator fragmentation across ~800 differently-shaped
+  batches, not true usage (the card was at 0 MiB immediately after the crash).
+  Fixed three ways: `max_batch_tokens` 8192 → 6144, `empty_cache()` after every
+  group, and an OOM-safe retry that bisects a group and retries rather than
+  losing the run. Re-run completed all 8896 rows clean. This was the sprint's
+  other stop condition ("mGPT won't load in 8GB") — it loaded and fit; the
+  failure was allocator behaviour over a long run, an engineering fix, not a
+  capacity or scope question, so it did not require stopping to ask.
+
+**Verify:** `python -m src.eval.score --report headA,headB,headB_word` (reads
+`results/scores.parquet`, no GPU needed); `pytest tests/features/test_curvature.py`
+→ 9 passed.
+
+---
+
 ## Decisions still open (fill as resolved)
 
 - [ ] Phase 0.1 — what "patent" means (disclosure / IPR-cell / IPO provisional).
