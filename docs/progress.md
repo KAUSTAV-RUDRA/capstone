@@ -1039,3 +1039,45 @@ completed clean.
 and `fastdetectgpt_en` — the decisive test for whether the hi/te inversion is
 scorer-specific (different pretraining) or a property of curvature on Indic
 text generally. Prioritise `fastdetectgpt_en` first.
+
+## 2026-09-25 — Day 3: fastdetectgpt_en, ppl, binoculars, headC scored
+
+fastdetectgpt_en (Fast-DetectGPT, scorer Qwen2.5-0.5B instead of mGPT) run
+first, as the decisive test for last night's headB inversion: hi/te are no
+longer inverted (0.728, 0.555 vs headB's 0.187, 0.120) — the effect is
+scorer-specific (mGPT contamination), not a property of curvature on this
+corpus's Indic text. Source breakdown confirms it, same method as last
+night. te's signal is still weak even with the right sign — plausibly
+Qwen's much worse Telugu tokenizer fragmentation (11.9 vs mGPT's 6.3
+tok/word) layered on top. Full writeup: `docs/decisions.md` 2026-09-25.
+
+ppl (negated mean log-perplexity, Qwen2.5-0.5B) is the strongest single
+column on hi/te (0.816, 0.847) — a first-order statistic is less exposed to
+fragmentation noise than curvature's variance normalisation. It's the
+intentionally-naive baseline non-negotiable #2 exists to contrast against,
+not a fusion candidate.
+
+binoculars (observer/performer Qwen2.5-0.5B / -Instruct) tracks
+fastdetectgpt_en closely everywhere, as expected for a related statistic.
+
+headC (MuRIL, per-bucket logistic over mean-pooled embeddings) scored
+AUROC 1.000 in en/hi/te, 0.927 in cm — flagged as too strong to trust yet:
+same-generator only, no held-out-generator check (non-negotiable #4), likely
+a shortcut (length/register/residual artifact) rather than robust semantics.
+Not reported as a headline number until checked against T3/T4.
+
+All four full-corpus runs (8896 rows each) completed with zero OOMs, reusing
+last night's token-budget batching + retry (`src/features/curvature.py`,
+now shared free functions) across `CurvatureScorer` (both scorers),
+`BinocularsDetector`, and the new `MurilEmbedder`. One cosmetic bug fixed:
+`score.py`'s trailing summary print crashed on binoculars's cache shape
+after a fully-successful run (data was already merged); guarded with
+`isinstance`.
+
+**Verify:** `python -m src.eval.score --report headA,headB,headB_word,fastdetectgpt_en,ppl,binoculars,headC`;
+`pytest tests/baselines/test_binoculars.py tests/features/test_semantic.py` → 7 passed.
+
+**Next:** Day 4 — fusion, per-bucket temperature + conformal calibration,
+T1/T2/T5/T6/F1/F2 tables. headC needs a held-out-generator sanity check
+before its weight in fusion is trusted at face value. xlmr (Part 18) still
+unimplemented — optional per the sprint plan.

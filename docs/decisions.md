@@ -1334,6 +1334,109 @@ retargeted before the December filing. Flagged for P2, who owns Patent 2.
 
 ---
 
+## 2026-09-25 — Day 3: the hi/te inversion is mGPT-specific, not a property of curvature
+
+**Result (test AUROC, qwen7b, full corpus):**
+
+| bucket | headA | headB (mGPT) | headB_word | fastdetectgpt_en (Qwen2.5-0.5B) | ppl (Qwen2.5-0.5B) | binoculars | headC (MuRIL) |
+|---|---|---|---|---|---|---|---|
+| en | 0.991 | 0.859 | 0.832 | 0.794 [0.759, 0.830] | 0.915 [0.889, 0.936] | 0.804 [0.770, 0.837] | 1.000 [0.999, 1.000] |
+| cm | 0.910 | 0.661 | 0.635 | 0.696 [0.632, 0.762] | 0.711 [0.644, 0.773] | 0.661 [0.596, 0.728] | 0.927 [0.895, 0.953] |
+| hi | 0.984 | **0.187** | 0.192 | **0.728** [0.689, 0.768] | 0.816 [0.780, 0.850] | 0.732 [0.691, 0.772] | 1.000 [0.999, 1.000] |
+| te | 0.989 | **0.120** | 0.122 | **0.555** [0.502, 0.604] | 0.847 [0.812, 0.880] | 0.564 [0.513, 0.615] | 1.000 [1.000, 1.000] |
+
+**fastdetectgpt_en (same statistic as headB, scorer = Qwen2.5-0.5B instead of
+mGPT) is the answer to last night's open question: is the hi/te inversion
+scorer-specific, or a property of curvature on this corpus's Indic text?**
+It's scorer-specific. With a different scorer, hi and te are no longer
+inverted — hi jumps from 0.187 to 0.728, te from 0.120 to 0.555. Neither
+matches headA or even mGPT's own en/cm numbers, but both are on the correct
+side of 0.5, with CIs that exclude it. **headB's inversion is mGPT-specific**,
+consistent with last night's contamination hypothesis (mGPT's Indic pretraining
+overlapping this project's only available Indic human corpora) rather than a
+structural property of curvature-based detection on Indic text in general —
+that door is not closed, but this rules out the strongest, corpus-wide version
+of it.
+
+**Source breakdown confirms it, same method as last night:**
+
+| bucket | source | n | mean fastdetectgpt_en | vs. machine mean |
+|---|---|---|---|---|
+| hi | indiccorp_v2 | 565 | −0.364 | machine +0.484 (**above**, correct direction) |
+| hi | wikipedia | 219 | −0.492 | — |
+| te | indiccorp_v2 | 546 | −1.515 | machine −1.459 (**above**, correct, barely) |
+| te | wikipedia | 152 | −2.615 | — |
+
+For hi, both human sources now sit clearly below qwen7b's mean — the mirror
+image of headB's numbers. For te, IndicCorp is now essentially tied with
+qwen7b (−1.515 vs −1.459) while Wikipedia is well below it — direction is
+correct on average (AUROC 0.555, CI excludes 0.5) but the margin is thin,
+matching the weak-not-inverted AUROC. **A second, compounding effect is visible
+here and worth separating from the contamination story**: Qwen2.5-0.5B's
+tokenizer fragments Telugu far worse than mGPT's (11.919 vs 6.319 tokens/word,
+locked-decision table above), and curvature is a statistic over per-token
+log-probabilities — so te's *weak* signal with this scorer is plausibly a
+fragmentation effect layered on top of a real but modest curvature signal,
+independent of which scorer produced it. This is exactly the tokenizer-
+fertility argument that locked mGPT as Head B's scorer in the first place
+(2026-09-13); it now also explains why swapping to Qwen2.5-0.5B doesn't fully
+recover te even once the inversion is gone.
+
+**ppl (negated mean log-perplexity, Qwen2.5-0.5B) is the strongest single
+column on hi and te** (0.816, 0.847) — stronger than its own curvature
+sibling on the same scorer. Not surprising in hindsight: perplexity is a
+first-order statistic (needs no reference distribution, no variance
+normalisation), so it's less exposed to a fragmented tokenizer's noisy
+per-token variance estimates than curvature is. This is exactly the raw-
+perplexity failure mode non-negotiable #2 exists to avoid (§2, §4) — ppl is
+in the registry as the intentionally-naive baseline T1 needs, not a candidate
+for the fusion head.
+
+**binoculars tracks fastdetectgpt_en closely in both direction and magnitude
+across all four buckets** (cm 0.661/0.696, en 0.804/0.794, hi 0.732/0.728, te
+0.564/0.555) — expected, since both are variants of the same cross-entropy-
+style statistic (§ module docstring, `src/baselines/binoculars.py`) and share
+an observer/performer pair from the same base model.
+
+**headC (MuRIL) is suspiciously strong — flagged, not fully trusted yet.**
+AUROC 1.000 in en/hi/te, 0.927 in cm. This is same-generator (qwen7b only,
+no held-out generator — non-negotiable #4 explicitly requires held-out-
+generator evaluation before any result counts) and it is far stronger than
+every other head including headA. A semantic encoder achieving *perfect*
+separation is the kind of result that's usually a shortcut — length, register,
+or a residual generation artifact clean_artifacts.py didn't strip — rather
+than genuine machine-vs-human semantics holding up under paraphrase or a
+different generator. Not chased further today (out of scope for a scoring
+session), but headC's numbers should not be reported anywhere as a headline
+result until they've been checked against a held-out generator (T3) and,
+ideally, an adversarial paraphrase (T4). Noted for P1/P2 before fusion weights
+are fit on it.
+
+**Engineering, same session:** the OOM-safe token-budget batching and retry
+built for headB last night (`token_budget_groups`, `run_group_with_oom_retry`
+in `src/features/curvature.py`) is now a free function, reused as-is by
+`CurvatureScorer` (mGPT, Qwen2.5-0.5B — same class, different `scorer_model`),
+`BinocularsDetector` (two simultaneous models), and `MurilEmbedder`. All four
+full-corpus runs today (fastdetectgpt_en+ppl, binoculars, headC) completed
+with zero OOMs. `CurvatureScorer.full_stats()` now returns a third column,
+`ll_mean` (mean observed log-likelihood), free from the same forward pass that
+computes curvature — that's what `ppl` reads; `stats()`'s existing 2-column
+contract (headB/headB_word) is unchanged, verified by a new test asserting
+`stats() == full_stats()[:, :2]`.
+
+One trailing bug, caught by binoculars, fixed: `score.py`'s final summary
+print assumed every column's `ctx.cache` entry was a `(head, feats)` tuple
+(true for headA/headC only); binoculars caches the detector object itself,
+which crashed the print *after* all 8896 rows were already scored and merged
+— cosmetic (exit 1 on a run that fully succeeded), fixed with an `isinstance`
+guard.
+
+**Verify:** `python -m src.eval.score --report headA,headB,headB_word,fastdetectgpt_en,ppl,binoculars,headC`
+(reads `results/scores.parquet`, no GPU); `pytest tests/baselines/test_binoculars.py
+tests/features/test_semantic.py` → 3 + 4 passed.
+
+---
+
 ## Decisions still open (fill as resolved)
 
 - [ ] Phase 0.1 — what "patent" means (disclosure / IPR-cell / IPO provisional).

@@ -40,6 +40,7 @@ of a text has no prediction and is unscored, as in Fast-DetectGPT.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -89,6 +90,66 @@ def curvature_stats(lp: np.ndarray, mean: np.ndarray, var: np.ndarray, word_ids:
     z = dev_w / np.sqrt(np.maximum(var_w, word_var_floor))
     d_word = float(z.sum() / np.sqrt(z.size))
     return d_tok, d_word
+
+
+# ---------------------------------------------------------------------------
+# Shared batching/retry machinery. Free functions (not tied to CurvatureScorer)
+# so any causal-LM scorer over any scorer_model can reuse them — review2-sprint
+# Day 3 baselines (fastdetectgpt_en, ppl on Qwen2.5-0.5B) share this with headB.
+# ---------------------------------------------------------------------------
+def token_budget_groups(lengths: Sequence[int], max_batch_tokens: int, max_rows_per_batch: int) -> list[list[int]]:
+    """Index groups s.t. each group's ``rows * max(length)`` stays under the token budget.
+
+    Greedy over indices sorted short-to-long, so a mixed-length input batch
+    (the caller may not have pre-sorted) still packs efficiently rather than
+    padding every group to the input's longest text.
+    """
+    order = sorted(range(len(lengths)), key=lambda i: lengths[i])
+    groups: list[list[int]] = []
+    group: list[int] = []
+    group_max = 0
+    for i in order:
+        n = lengths[i]
+        grown = max(group_max, n)
+        if group and (len(group) + 1) * grown > max_batch_tokens:
+            groups.append(group)
+            group, group_max = [], 0
+            grown = n
+        group.append(i)
+        group_max = grown
+        if len(group) >= max_rows_per_batch:
+            groups.append(group)
+            group, group_max = [], 0
+    if group:
+        groups.append(group)
+    return groups
+
+
+def run_group_with_oom_retry(fn: "Callable[[list[int]], None]", group: list[int], depth: int = 0,
+                             max_depth: int = 6) -> None:
+    """Call ``fn(group)``; on a real CUDA OOM, clear the allocator cache and bisect
+    rather than lose the whole run.
+
+    A sustained scoring run makes hundreds of differently-shaped allocations; the
+    caching allocator can fragment well before true usage nears the card's limit
+    (measured: headB OOM'd at row 216/6784 of a run that peaked at 5.3/8.0 GiB in
+    isolation). ``empty_cache()`` after every group trades a little sync overhead
+    for not carrying that fragmentation into the next shape.
+    """
+    import torch
+
+    try:
+        fn(group)
+    except torch.cuda.OutOfMemoryError:
+        torch.cuda.empty_cache()
+        if len(group) == 1 or depth >= max_depth:
+            raise
+        mid = len(group) // 2
+        run_group_with_oom_retry(fn, group[:mid], depth + 1, max_depth)
+        run_group_with_oom_retry(fn, group[mid:], depth + 1, max_depth)
+    finally:
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
 
 class CurvatureScorer:
@@ -180,79 +241,43 @@ class CurvatureScorer:
         return out
 
     def _token_budget_groups(self, lengths: list[int]) -> list[list[int]]:
-        """Index groups s.t. each group's ``rows * max(length)`` stays under the token budget.
+        """This scorer's groups (see the free ``token_budget_groups``)."""
+        return token_budget_groups(lengths, self.max_batch_tokens, self.max_rows_per_batch)
 
-        Greedy over indices sorted short-to-long, so a mixed-length input batch
-        (the caller may not have pre-sorted) still packs efficiently rather than
-        padding every group to the input's longest text.
-        """
-        order = sorted(range(len(lengths)), key=lambda i: lengths[i])
-        groups: list[list[int]] = []
-        group: list[int] = []
-        group_max = 0
-        for i in order:
-            n = lengths[i]
-            grown = max(group_max, n)
-            if group and (len(group) + 1) * grown > self.max_batch_tokens:
-                groups.append(group)
-                group, group_max = [], 0
-                grown = n
-            group.append(i)
-            group_max = grown
-            if len(group) >= self.max_rows_per_batch:
-                groups.append(group)
-                group, group_max = [], 0
-        if group:
-            groups.append(group)
-        return groups
+    def _score_group(self, texts: list[str], group: list[int], result: "np.ndarray") -> None:
+        """Fill ``result[gi] = [d_tok, d_word, ll_mean]`` for every ``gi`` in ``group``."""
+        enc = self.tokenizer([texts[i] for i in group], truncation=True, max_length=self.max_length,
+                             padding=True, return_offsets_mapping=True, return_tensors="pt")
+        rows = self.position_stats(enc["input_ids"].to(self.model.device),
+                                   enc["attention_mask"].to(self.model.device))
+        for j, gi in enumerate(group):
+            lp, mean, var = rows[j]
+            n = int(enc["attention_mask"][j].sum())
+            words = token_word_ids(texts[gi], enc["offset_mapping"][j, :n].tolist())
+            d_tok, d_word = curvature_stats(lp, mean, var, np.asarray(words[1:]), self.word_var_floor)
+            result[gi] = [d_tok, d_word, float(lp.mean()) if lp.size else float("nan")]
 
-    def _score_group(self, texts: list[str], group: list[int], result: "np.ndarray", depth: int = 0) -> None:
-        """Run one token-budget group; on a real CUDA OOM, clear the allocator cache
-        and bisect the group rather than lose the whole run.
+    def full_stats(self, texts: list[str]) -> np.ndarray:
+        """``(len(texts), 3)`` array of ``[d_tok, d_word, ll_mean]``.
 
-        A sustained scoring run makes hundreds of differently-shaped allocations;
-        the caching allocator can fragment well before true usage nears the card's
-        limit (measured: 216/6784 rows into a run that peaked at 5.3/8.0 GiB in
-        isolation). ``empty_cache()`` after every group trades a little sync
-        overhead for not carrying that fragmentation into the next shape.
-        """
-        import torch
-
-        try:
-            enc = self.tokenizer([texts[i] for i in group], truncation=True, max_length=self.max_length,
-                                 padding=True, return_offsets_mapping=True, return_tensors="pt")
-            rows = self.position_stats(enc["input_ids"].to(self.model.device),
-                                       enc["attention_mask"].to(self.model.device))
-            for j, gi in enumerate(group):
-                lp, mean, var = rows[j]
-                n = int(enc["attention_mask"][j].sum())
-                words = token_word_ids(texts[gi], enc["offset_mapping"][j, :n].tolist())
-                result[gi] = curvature_stats(lp, mean, var, np.asarray(words[1:]), self.word_var_floor)
-        except torch.cuda.OutOfMemoryError:
-            torch.cuda.empty_cache()
-            if len(group) == 1 or depth >= 6:
-                raise
-            mid = len(group) // 2
-            self._score_group(texts, group[:mid], result, depth + 1)
-            self._score_group(texts, group[mid:], result, depth + 1)
-        finally:
-            if self.device == "cuda":
-                torch.cuda.empty_cache()
-
-    def stats(self, texts: list[str]) -> np.ndarray:
-        """``(len(texts), 2)`` array of ``[d_tok, d_word]``.
-
-        Internally re-batched to a VRAM-safe token budget (see ``max_batch_tokens``),
-        so callers can pass any batch size without risking an OOM on long buckets.
+        ``ll_mean`` is the mean observed log-likelihood per scored token — negated
+        mean log-perplexity, free from the same forward pass as the curvature
+        columns (serves the ``ppl`` baseline; review2-sprint Day 3). Internally
+        re-batched to a VRAM-safe token budget with an OOM-safe retry, so callers
+        can pass any batch size without risking an OOM on long buckets.
         """
         self.load()
         texts = list(texts)
         lengths = [min(len(ids), self.max_length)
                   for ids in self.tokenizer(texts, add_special_tokens=False)["input_ids"]]
-        result = np.full((len(texts), 2), np.nan)
+        result = np.full((len(texts), 3), np.nan)
         for group in self._token_budget_groups(lengths):
-            self._score_group(texts, group, result)
+            run_group_with_oom_retry(lambda g: self._score_group(texts, g, result), group)
         return result
+
+    def stats(self, texts: list[str]) -> np.ndarray:
+        """``(len(texts), 2)`` array of ``[d_tok, d_word]``. See :meth:`full_stats`."""
+        return self.full_stats(texts)[:, :2]
 
     def curvature(self, text: str) -> float:
         """Token-level Fast-DetectGPT curvature for one text."""
@@ -260,8 +285,12 @@ class CurvatureScorer:
 
     def score(self, texts: list[str]) -> np.ndarray:
         """Token-level curvature per text (headB). Higher = more machine-like."""
-        return self.stats(texts)[:, 0]
+        return self.full_stats(texts)[:, 0]
 
     def score_word(self, texts: list[str]) -> np.ndarray:
         """Word-level curvature per text (headB_word). Higher = more machine-like."""
-        return self.stats(texts)[:, 1]
+        return self.full_stats(texts)[:, 1]
+
+    def score_ppl(self, texts: list[str]) -> np.ndarray:
+        """Negated mean log-perplexity per text. Higher = more machine-like."""
+        return self.full_stats(texts)[:, 2]

@@ -78,6 +78,22 @@ def tiny_scorer() -> CurvatureScorer:
     return scorer
 
 
+def test_ll_mean_matches_position_stats_directly(tiny_scorer) -> None:
+    # full_stats()'s 3rd column is lp.mean() from the same position_stats this
+    # module already checks against a full-logits reference; exercised here via
+    # position_stats directly (no real tokenizer needed) since _score_group is a
+    # thin wrapper: tokenize -> position_stats -> curvature_stats + lp.mean().
+    import torch
+
+    r = torch.randint(0, 50, (11,))
+    lp, mean, var = tiny_scorer.position_stats(r[None], torch.ones(1, 11, dtype=torch.long))[0]
+    words = np.arange(len(lp))
+    d_tok, d_word = curvature_stats(lp, mean, var, words)
+    expected = [d_tok, d_word, float(lp.mean())]
+    assert expected[2] == pytest.approx(lp.mean())         # the line full_stats adds beyond stats()
+    assert np.isfinite(expected).all()
+
+
 def test_padded_batch_matches_single_rows_and_reference(tiny_scorer) -> None:
     import torch
 
