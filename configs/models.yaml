@@ -36,3 +36,18 @@ head_c_vram_threshold_gb: 7.5   # GiB, matching scripts/check_hardware.py: an "8
 # Machine-text generators live in configs/data.yaml under machine_corpus.generators
 # (one registry, read by src/data/generate.py): seen = qwen7b, gemma, mistral;
 # held-out, TEST ONLY (non-negotiable #4) = llama, phi. All via local Ollama, Q4_K_M.
+
+# --- Head A (src/features/stylometric.py; review2-sprint Day 2, parts-plan Part 14) ---
+# python -m src.eval.score --column headA
+# 25 surface features + 15 parser features (UPOS ratios, POS n-grams, tree depth,
+# dependency distance), one logistic regression per bucket fit on the train split.
+# Parsers run on CPU. cm has no Hinglish parser, so it shares en's spaCy model.
+head_a:
+  taggers: {en: spacy, cm: spacy, hi: stanza, te: stanza}
+  spacy_model: en_core_web_sm            # pinned wheel in requirements.txt
+  stanza_processors: tokenize,pos,lemma,depparse
+  features_cache: results/features/stylometric.parquet   # tagging is the slow part; refits reuse it
+  model_path: results/models/headA.joblib
+  C: 1.0
+  class_weight: balanced                 # train is not 1:1 (cm 596 human : 82 machine)
+  cv_folds: 5                            # per-bucket CV AUROC on train = the instability report

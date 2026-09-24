@@ -1214,6 +1214,22 @@ happens.
 
 ---
 
+## 2026-09-24 (evening) — Head A: real parsers, per-bucket logistic head
+
+| Decision | Value | Why |
+|---|---|---|
+| Parsers | stanza (UD HDTB / MTG) for hi, te; spaCy `en_core_web_sm` for en, cm; CPU only | Real UPOS + dependency trees in every bucket. CPU keeps Head A off the GPU that headB needs and inside the 4 GB floor. |
+| cm uses the English parser | Documented as weaker evidence | No parser for romanised Hinglish exists. The same parser runs on both classes, so its errors are noise, not a class shortcut. |
+| Keep the 25 surface features, including the old proxies | 25 + 15 = 40 | The request was to keep them. The proxies still carry signal; the real parser features now answer "POS n-grams, syntactic depth". |
+| One logistic head per bucket, `class_weight=balanced` | `HeadA` | Feature baselines differ by language; train is not 1:1 (cm 596 : 82). |
+| Instability is reported as 5-fold CV AUROC spread on train, and a bootstrap CI on test | `format_auroc` in score.py | cm's ± 0.054 CV spread (vs ± 0.004–0.008) is the measurable form of "82 machine rows is thin". |
+| `click==8.1.8` pinned | requirements.txt | spaCy 3.8.4's CLI imports it and typer ≥ 0.20 stopped pulling it in; without it `import spacy` fails. |
+
+Result (test AUROC): en 0.991, hi 0.984, te 0.989, cm 0.910. Same-generator, qwen7b
+only; see docs/progress.md 2026-09-24.
+
+---
+
 ## Decisions still open (fill as resolved)
 
 - [ ] Phase 0.1 — what "patent" means (disclosure / IPR-cell / IPO provisional).

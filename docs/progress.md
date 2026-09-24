@@ -5,6 +5,46 @@ Newest entries at the top.
 
 ---
 
+## 2026-09-24 — Head A scored: first real result
+
+Review-2 sprint Day 2, Head A only (no GPU; headB / headB_word next sitting).
+`src/features/stylometric.py` now has 40 features: the 25 surface features
+unchanged, plus 15 from real parsers (stanza hi/te, spaCy `en_core_web_sm` en/cm,
+CPU): 10 UPOS ratios, POS bigram entropy / type ratio, POS trigram repeat rate,
+mean tree depth, mean dependency distance. `HeadA` fits one standardise→logistic
+regression per bucket on the train split (`class_weight=balanced`); column `headA`
+is in `results/scores.parquet`, the model in `results/models/headA.joblib`, the
+feature cache in `results/features/stylometric.parquet`. Parsing 8,896 rows took
+49 min on CPU.
+
+| bucket | test h/m | AUROC | 95 % CI | train h/m | train 5-fold CV AUROC |
+|---|---|---|---|---|---|
+| en | 272/361 | **0.991** | [0.985, 0.995] | 271/359 | 0.984 ± 0.004 |
+| hi | 392/233 | **0.984** | [0.974, 0.994] | 392/233 | 0.991 ± 0.008 |
+| te | 349/165 | **0.989** | [0.981, 0.995] | 349/163 | 0.993 ± 0.006 |
+| cm | 596/83 | **0.910** | [0.883, 0.934] | 596/82 | 0.902 ± **0.054** |
+
+- **cm is unstable, as expected with 82 machine train rows.** Its CV spread is 7–13×
+  the other buckets' (± 0.054 vs ± 0.004–0.008), and its test CI is ~5× wider. Its
+  leading coefficients (uppercase ratio, punctuation diversity) partly reflect
+  register (lower-case social comments vs. punctuated machine chat), and cm goes
+  through an English parser. Read cm's 0.91 as provisional until gemma/mistral
+  add machine rows. Its bound is chat-register (decisions.md 2026-09-24).
+- **Shortcut check.** No single feature separates the classes (best single-feature
+  test AUROC 0.83–0.92: sentence-length burstiness, MTLD, comma rate). en does not
+  hinge on samanantar's shuffled-sentence construction: headA vs machine is 0.983 for
+  hc3 humans and 0.986 for Wikipedia, against 0.998 for samanantar.
+- **Scope of the number.** One generator (qwen7b), seen in training. This is
+  same-generator performance: high by construction, and not the paper's headline
+  (non-negotiable #4; T3 needs llama/phi).
+
+**Verify:** `python -m src.eval.score --column headA` (reuses the feature cache,
+~10 s) → prints the table above. `pytest tests/features/test_stylometric.py`.
+
+**Next:** Day 2 GPU half: headB and headB_word (mGPT, fp16) on mains power.
+
+---
+
 ## 2026-09-24 — Part 13: corpus v1 frozen (qwen7b)
 
 Review-2 sprint Day 1. `clean_artifacts.py` and `freeze_splits.py` implemented;

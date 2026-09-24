@@ -51,6 +51,8 @@ class ScoreContext:
     device: str | None = None
     models_config: dict[str, Any] = field(default_factory=dict)
     cache: dict[str, Any] = field(default_factory=dict)   # loaded models, reused across batches
+    corpus_path: Path = Path(DEFAULT_CORPUS)               # supervised columns fit on its train split
+    max_minutes: float = 0
 
 
 ColumnFn = Callable[[Sequence[str], Sequence[dict[str, Any]], ScoreContext], Sequence[float]]
@@ -79,13 +81,88 @@ def register(name: str, doc: str) -> Callable[[ColumnFn], ColumnFn]:
 # that fills it in, so running one early fails with a pointer rather than a
 # silent column of zeros.
 # ---------------------------------------------------------------------------
-@register("headA", "Head A: stylometric features -> per-bucket logistic regression (Part 14)")
+def stylometric_features(rows: Sequence[dict[str, Any]], cfg: dict[str, Any],
+                         max_minutes: float = 0) -> dict[str, list[float]]:
+    """Head A's 40 raw features for ``rows``, id -> vector, cached on disk.
+
+    Parsing is the slow part (stanza ~0.5 s/passage on CPU for hi/te), so vectors
+    are journalled next to ``features_cache`` as they are computed and a killed run
+    resumes; the finished set is folded into the parquet. Rows are batched by
+    bucket so each batch uses one parser.
+    """
+    import pandas as pd
+
+    from src.features.stylometric import StylometricExtractor
+
+    cache = Path(cfg["features_cache"])
+    journal = cache.parent / f".{cache.stem}.jsonl"
+    have: dict[str, list[float]] = {}
+    if cache.exists():
+        table = pd.read_parquet(cache)
+        have = dict(zip(table["id"], table["features"].map(list)))
+    missing = [r for r in rows if r["id"] not in have]
+    if missing:
+        extractor = StylometricExtractor(config=cfg, syntax=True)
+        missing.sort(key=lambda r: (r["language"], r["id"]))
+
+        def process(batch: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+            X = extractor.raw_features([r["text"] for r in batch], [r["language"] for r in batch])
+            return [{"id": r["id"], "features": x.tolist()} for r, x in zip(batch, X)]
+
+        report = run_resumable(missing, id_of=lambda r: r["id"], process_batch=process,
+                               out_path=journal, batch_size=32, max_minutes=max_minutes,
+                               label="rows (features)")
+        if report.errors:
+            raise RuntimeError(f"feature extraction failed: {report.errors[0]}")
+        for entry in read_jsonl(journal, skip_bad_lines=True):
+            have[entry["id"]] = entry["features"]
+        still = [r["id"] for r in rows if r["id"] not in have]
+        if still:
+            raise RuntimeError(f"{len(still)} rows still lack features (time budget hit?); re-run to resume")
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame({"id": list(have), "features": list(have.values())}).to_parquet(cache, index=False)
+        journal.unlink(missing_ok=True)
+    return {r["id"]: have[r["id"]] for r in rows}
+
+
+def fit_headA(ctx: ScoreContext) -> Any:
+    """Fit Head A on the corpus's train split, save it, log train CV AUROC."""
+    import numpy as np
+
+    from src.features.stylometric import SYNTAX_FEATURE_NAMES, HeadA, StylometricExtractor
+
+    cfg = ctx.models_config["head_a"]
+    corpus = read_jsonl(ctx.corpus_path)
+    feats = stylometric_features(corpus, cfg, ctx.max_minutes)
+    train = [r for r in corpus if r["split"] == "train"]
+    X = np.asarray([feats[r["id"]] for r in train], dtype=float)
+    y = np.asarray([r["label"] for r in train])
+    buckets = [r["language"] for r in train]
+    names = StylometricExtractor(syntax=True).feature_names()
+    assert len(names) == X.shape[1] and names[-len(SYNTAX_FEATURE_NAMES):] == SYNTAX_FEATURE_NAMES
+    head = HeadA(names, C=float(cfg.get("C", 1.0)), class_weight=cfg.get("class_weight", "balanced"))
+    head.cv_ = head.cv_auroc(X, y, buckets, folds=int(cfg.get("cv_folds", 5)))
+    head.fit(X, y, buckets)
+    head.train_counts_ = {b: {"human": int(sum(1 for r in train if r["language"] == b and r["label"] == 0)),
+                              "machine": int(sum(1 for r in train if r["language"] == b and r["label"] == 1))}
+                          for b in sorted(set(buckets))}
+    head.save(cfg["model_path"])
+    log.info("headA fitted on %d train rows -> %s", len(train), cfg["model_path"])
+    return head, feats
+
+
+@register("headA", "Head A: 40 stylometric + parser features -> per-bucket logistic regression (Part 14)")
 def score_headA(texts, rows, ctx):
-    raise NotImplementedError(
-        "headA lands in parts-plan Part 14: extend src/features/stylometric.py with real "
-        "POS n-grams and dependency depth (stanza for hi/te, spaCy for en/cm), fit a "
-        "per-bucket logistic regression on the train split, score all rows."
-    )
+    import numpy as np
+
+    if "headA" not in ctx.cache:
+        ctx.cache["headA"] = fit_headA(ctx)
+    head, feats = ctx.cache["headA"]
+    missing = [r for r in rows if r["id"] not in feats]            # e.g. attacked rows
+    if missing:
+        feats.update(stylometric_features(missing, ctx.models_config["head_a"]))
+    X = np.asarray([feats[r["id"]] for r in rows], dtype=float)
+    return head.predict(X, [r["language"] for r in rows]).tolist()
 
 
 @register("headB", "Head B: Fast-DetectGPT curvature, scorer ai-forever/mGPT (Part 15)")
@@ -230,8 +307,11 @@ def main(argv: list[str] | None = None) -> None:
     scores_path = Path(args.scores)
     journal = journal_path(scores_path, args.column)
     ctx = ScoreContext(config=load_config(args.config), device=args.device,
-                       models_config=load_config(args.config))
+                       models_config=load_config(args.config), corpus_path=Path(args.corpus),
+                       max_minutes=args.max_minutes)
     column_fn = COLUMN_REGISTRY[args.column]
+    if args.column == "headA":            # fit once, up front, not inside the first batch
+        ctx.cache["headA"] = fit_headA(ctx)
 
     def process_batch(batch: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
         values = column_fn([r["text"] for r in batch], batch, ctx)
@@ -249,6 +329,56 @@ def main(argv: list[str] | None = None) -> None:
     print(report.summary(f"resume with: python -m src.eval.score --column {args.column}"))
     if report.errors:
         print(f"first error: {report.errors[0]}")
+    if Path(args.corpus).exists() and scores_path.exists():
+        head = ctx.cache.get(args.column, (None,))[0]
+        print(format_auroc(auroc_by_bucket(scores_path, Path(args.corpus), args.column), head))
+
+
+def auroc_by_bucket(scores_path: Path, corpus_path: Path, column: str, split: str = "test",
+                    n_boot: int = 1000, seed: int = 0) -> list[dict[str, Any]]:
+    """Per-bucket AUROC of ``column`` on ``split``, with a 95 % bootstrap interval.
+
+    The interval resamples human and machine rows separately (stratified), so each
+    replicate keeps the split's class counts.
+    """
+    import numpy as np
+    import pandas as pd
+    from sklearn.metrics import roc_auc_score
+
+    scores = pd.read_parquet(scores_path).set_index("id")[column]
+    rows = [r for r in read_jsonl(corpus_path) if r["split"] == split and r["id"] in scores.index]
+    rng = np.random.default_rng(seed)
+    out = []
+    for bucket in sorted({r["language"] for r in rows}):
+        sub = [r for r in rows if r["language"] == bucket]
+        y = np.asarray([r["label"] for r in sub])
+        s = scores.loc[[r["id"] for r in sub]].to_numpy(dtype=float)
+        h, m = np.flatnonzero(y == 0), np.flatnonzero(y == 1)
+        boots = []
+        for _ in range(n_boot):
+            idx = np.concatenate([rng.choice(h, len(h)), rng.choice(m, len(m))])
+            boots.append(roc_auc_score(y[idx], s[idx]))
+        lo, hi = np.percentile(boots, [2.5, 97.5])
+        out.append({"bucket": bucket, "split": split, "human": len(h), "machine": len(m),
+                    "auroc": float(roc_auc_score(y, s)), "ci_lo": float(lo), "ci_hi": float(hi)})
+    return out
+
+
+def format_auroc(table: list[dict[str, Any]], head: Any = None) -> str:
+    """The AUROC table; with a fitted supervised head, also its train CV spread."""
+    cv = getattr(head, "cv_", None) or {}
+    counts = getattr(head, "train_counts_", None) or {}
+    lines = [f"\n{'bucket':6} {'test h/m':>9} {'AUROC':>6}  {'95% CI':>13}"
+             + (f"  {'train h/m':>9}  {'train CV AUROC':>15}" if cv else "")]
+    for t in table:
+        line = (f"{t['bucket']:6} {t['human']:>4}/{t['machine']:<4} {t['auroc']:6.3f}  "
+                f"[{t['ci_lo']:.3f}, {t['ci_hi']:.3f}]")
+        if t["bucket"] in cv:
+            c = counts.get(t["bucket"], {})
+            mean, std = cv[t["bucket"]]
+            line += f"  {c.get('human', 0):>4}/{c.get('machine', 0):<4}  {mean:.3f} ± {std:.3f}"
+        lines.append(line)
+    return "\n".join(lines)
 
 
 if __name__ == "__main__":

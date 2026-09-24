@@ -8,33 +8,41 @@ extractor contract ``fit`` / ``transform`` / ``feature_names``.
 
 Serves docs/master-execution-plan.md Phase 1 (Day 2) and Phase 2 §2.2.2.
 
-Design note (Phase 1 scope)
----------------------------
-Every feature here is computed with the standard library + numpy only. No
-spaCy/stanza model is loaded, so extraction never triggers a model download and
-never crashes on Devanagari or Telugu input (non-negotiable: multilingual stays
-in scope). Word tokenisation is Unicode-aware; sentence splitting understands the
-Devanagari danda (``।``).
+Two feature groups
+------------------
+**Surface (25, :data:`_FEATURE_NAMES`)**: standard library + numpy only, never
+loads a model, never crashes on Devanagari or Telugu. Unchanged since Phase 1.
+It includes two model-free proxies from before real taggers existed —
+function/content-word transitions (for POS n-grams) and punctuation-delimited
+clauses per sentence (for syntactic depth). They stay as features: they are cheap
+and still carry signal, but the syntax group below is what now answers "POS
+n-grams, syntactic depth".
 
-The docstring lists "POS n-grams, syntactic depth". True POS-tag n-grams and
-dependency-tree depth need a per-bucket tagger/parser and are deferred to Phase 2
-§2.2.2 (they plug in behind this same interface). Until then they are realised as
-script-agnostic proxies that carry the same stylistic signal without a model:
+**Syntax (15, :data:`SYNTAX_FEATURE_NAMES`)** — review2-sprint Day 2, parts-plan
+Part 14: real Universal POS tags and dependency trees from a per-bucket parser,
+stanza for hi and te, spaCy ``en_core_web_sm`` for en and cm
+(:data:`DEFAULT_TAGGERS`). Ten UPOS ratios, three POS n-gram statistics, mean
+tree depth and mean dependency distance. Taggers load lazily, once per process,
+so importing this module still needs nothing installed.
 
-- POS n-grams        -> function/content-word transition ratios (a word is
-                        "function" iff it is in the bucket's function-word list).
-- syntactic depth    -> punctuation-delimited clause count per sentence.
+**cm through an English parser.** No parser exists for romanised Hinglish;
+spaCy's English model tags most Hindi words as PROPN/NOUN. The tags are noisy but
+the same parser runs on human and machine cm alike, so they are noise, not a class
+shortcut. Treat cm's syntax features as weaker evidence than the other buckets'.
 
 ``score`` is a transparent, *provisional* unsupervised head (human text is
-burstier / less repetitive than machine text). The trained fusion head that
-replaces it is P1's Phase-2 work; this keeps the shared contract callable for the
-Day-4 Django demo without pretending to be a calibrated verdict.
+burstier / less repetitive than machine text), kept for callers with no fitted
+model. The trained head is :class:`HeadA`: one logistic regression per bucket
+over all 40 features, fit on the train split (``src/eval/score.py --column headA``).
 """
 from __future__ import annotations
 
 import math
 import re
 from collections import Counter
+from collections.abc import Sequence
+from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -171,17 +179,142 @@ def _mtld(tokens: list[str]) -> float:
     return 0.5 * (_mtld_one_direction(tokens) + _mtld_one_direction(tokens[::-1]))
 
 
+# --- Syntax group: real POS tags and dependency trees -------------------------
+#: Parser backend per bucket. stanza has UD models for Hindi (HDTB) and Telugu
+#: (MTG); nothing parses romanised Hinglish, so cm shares en's spaCy model.
+DEFAULT_TAGGERS: dict[str, str] = {"en": "spacy", "cm": "spacy", "hi": "stanza", "te": "stanza"}
+DEFAULT_SPACY_MODEL = "en_core_web_sm"
+DEFAULT_STANZA_PROCESSORS = "tokenize,pos,lemma,depparse"
+
+#: UPOS tags reported as a share of non-punctuation words. CCONJ and SCONJ are
+#: pooled: the Telugu treebank barely distinguishes them.
+_UPOS_GROUPS: dict[str, tuple[str, ...]] = {
+    "noun": ("NOUN",), "propn": ("PROPN",), "verb": ("VERB",), "aux": ("AUX",),
+    "adj": ("ADJ",), "adv": ("ADV",), "pron": ("PRON",), "det": ("DET",),
+    "adp": ("ADP",), "conj": ("CCONJ", "SCONJ"),
+}
+_NON_WORD_UPOS = frozenset({"PUNCT", "SYM", "X"})
+
+SYNTAX_FEATURE_NAMES: list[str] = (
+    [f"upos_{name}_ratio" for name in _UPOS_GROUPS]
+    + ["pos_bigram_entropy", "pos_bigram_type_ratio", "pos_trigram_repeat_ratio",
+       "mean_tree_depth", "mean_dep_distance"]
+)
+
+#: A parsed text: sentences, each a list of ``(upos, head)`` with ``head`` the
+#: 1-based index of the word's head in its sentence and 0 for the root.
+Parsed = list[list[tuple[str, int]]]
+
+_PIPELINES: dict[tuple[str, str], Any] = {}
+
+
+def _load_pipeline(backend: str, bucket: str, spacy_model: str, stanza_processors: str) -> Any:
+    key = (backend, bucket if backend == "stanza" else spacy_model)
+    if key not in _PIPELINES:
+        if backend == "spacy":
+            import spacy
+
+            _PIPELINES[key] = spacy.load(spacy_model, disable=["ner", "lemmatizer"])
+        elif backend == "stanza":
+            import stanza
+
+            _PIPELINES[key] = stanza.Pipeline(bucket, processors=stanza_processors,
+                                              use_gpu=False, verbose=False)
+        else:
+            raise ValueError(f"unknown tagger backend {backend!r} (want spacy | stanza)")
+    return _PIPELINES[key]
+
+
+def parse_texts(texts: Sequence[str], bucket: str, taggers: dict[str, str] | None = None,
+                spacy_model: str = DEFAULT_SPACY_MODEL,
+                stanza_processors: str = DEFAULT_STANZA_PROCESSORS) -> list[Parsed]:
+    """UPOS + dependency heads for every text in one bucket, batched.
+
+    CPU only (``use_gpu=False``): Head A must run on the 4 GB floor and alongside
+    GPU scoring without contending for it.
+    """
+    backend = (taggers or DEFAULT_TAGGERS)[bucket]
+    nlp = _load_pipeline(backend, bucket, spacy_model, stanza_processors)
+    out: list[Parsed] = []
+    if backend == "spacy":
+        for doc in nlp.pipe(list(texts), batch_size=64):
+            out.append([[(t.pos_, 0 if t.head.i == t.i else t.head.i - sent.start + 1) for t in sent]
+                        for sent in doc.sents])
+    else:
+        import stanza
+
+        docs = nlp.bulk_process([stanza.Document([], text=t) for t in texts])
+        for doc in docs:
+            out.append([[(w.upos, int(w.head or 0)) for w in sent.words] for sent in doc.sentences])
+    return out
+
+
+def _entropy(counts: Counter) -> float:
+    total = sum(counts.values())
+    if not total:
+        return 0.0
+    return -sum((c / total) * math.log2(c / total) for c in counts.values())
+
+
+def syntax_features(parsed: Parsed) -> list[float]:
+    """The :data:`SYNTAX_FEATURE_NAMES` values for one parsed text (zeros if empty)."""
+    tags = [upos for sent in parsed for upos, _ in sent]
+    words = [t for t in tags if t not in _NON_WORD_UPOS]
+    n_words = len(words)
+    tag_counts = Counter(words)
+    ratios = [sum(tag_counts[t] for t in group) / n_words if n_words else 0.0
+              for group in _UPOS_GROUPS.values()]
+
+    # POS n-grams within sentences, punctuation included (it is part of the rhythm).
+    bigrams: Counter = Counter()
+    trigrams: Counter = Counter()
+    for sent in parsed:
+        seq = [upos for upos, _ in sent]
+        bigrams.update(zip(seq, seq[1:]))
+        trigrams.update(zip(seq, seq[1:], seq[2:]))
+    n_bi, n_tri = sum(bigrams.values()), sum(trigrams.values())
+    bigram_entropy = _entropy(bigrams)
+    bigram_type_ratio = len(bigrams) / n_bi if n_bi else 0.0
+    trigram_repeat = sum(c for c in trigrams.values() if c > 1) / n_tri if n_tri else 0.0
+
+    depths: list[float] = []
+    distances: list[int] = []
+    for sent in parsed:
+        heads = [h for _, h in sent]
+        max_depth = 0
+        for i in range(1, len(heads) + 1):
+            depth, node = 1, i
+            while heads[node - 1] and depth <= len(heads):   # bound guards a malformed cycle
+                node = heads[node - 1]
+                depth += 1
+            max_depth = max(max_depth, depth)
+            if heads[i - 1]:
+                distances.append(abs(i - heads[i - 1]))
+        if heads:
+            depths.append(float(max_depth))
+    return ratios + [
+        bigram_entropy, bigram_type_ratio, trigram_repeat,
+        float(np.mean(depths)) if depths else 0.0,
+        float(np.mean(distances)) if distances else 0.0,
+    ]
+
+
 class StylometricExtractor:
     """Extracts and (optionally) scores stylometric features."""
 
-    def __init__(self, language: str | None = None, config: dict | None = None) -> None:
+    def __init__(self, language: str | None = None, config: dict | None = None,
+                 syntax: bool | None = None) -> None:
         """Args:
         language: Optional bucket for language-aware norms (``en``/``hi``/``te``/``cm``).
-        config: Loaded ``configs/default.yaml``.
+        config: Loaded ``configs/default.yaml``, or the ``head_a`` block of
+            ``configs/models.yaml`` (``taggers``, ``spacy_model``, ``stanza_processors``).
+        syntax: Add the 15 parser features (default ``config["syntax"]``, else
+            True). False gives the model-free 25, which never loads a parser.
         """
         self.language = language
         self.config = config or {}
-        self._feature_names = list(_FEATURE_NAMES)
+        self.syntax: bool = bool(self.config.get("syntax", True) if syntax is None else syntax)
+        self._feature_names = list(_FEATURE_NAMES) + (list(SYNTAX_FEATURE_NAMES) if self.syntax else [])
         # Standardise transform() output once fitted (per "feature norms" in the
         # plan). Configurable; on by default so downstream ML sees zero-mean data.
         self.standardize: bool = bool(self.config.get("standardize", True))
@@ -298,11 +431,29 @@ class StylometricExtractor:
             digit_ratio, uppercase_ratio,
         ]
 
-    def _raw_matrix(self, texts: list[str]) -> np.ndarray:
+    def _raw_matrix(self, texts: list[str], languages: list[str] | None = None) -> np.ndarray:
         if not texts:
             return np.zeros((0, len(self._feature_names)), dtype=float)
-        rows = [self._features_for_text(t) for t in texts]
-        return np.asarray(rows, dtype=float)
+        surface = np.asarray([self._features_for_text(t) for t in texts], dtype=float)
+        if not self.syntax:
+            return surface
+        buckets = list(languages) if languages is not None else [self._bucket_for(t) for t in texts]
+        if len(buckets) != len(texts):
+            raise ValueError("languages must be parallel to texts.")
+        syntax = np.zeros((len(texts), len(SYNTAX_FEATURE_NAMES)), dtype=float)
+        for bucket in sorted(set(buckets)):
+            idx = [i for i, b in enumerate(buckets) if b == bucket]
+            parsed = parse_texts(
+                [texts[i] for i in idx], bucket, self.config.get("taggers"),
+                self.config.get("spacy_model", DEFAULT_SPACY_MODEL),
+                self.config.get("stanza_processors", DEFAULT_STANZA_PROCESSORS))
+            for i, p in zip(idx, parsed):
+                syntax[i] = syntax_features(p)
+        return np.hstack([surface, syntax])
+
+    def raw_features(self, texts: list[str], languages: list[str] | None = None) -> np.ndarray:
+        """Unstandardised feature matrix; ``languages`` routes each text to its parser."""
+        return self._raw_matrix(texts, languages)
 
     # -- public API ----------------------------------------------------------
     def fit(self, texts: list[str], languages: list[str] | None = None) -> "StylometricExtractor":
@@ -319,7 +470,7 @@ class StylometricExtractor:
         Returns:
             self.
         """
-        raw = self._raw_matrix(texts)
+        raw = self._raw_matrix(texts, languages)
         if raw.shape[0] == 0:
             raise ValueError("fit() requires at least one text.")
         self.mean_ = raw.mean(axis=0)
@@ -340,20 +491,20 @@ class StylometricExtractor:
         self.fitted_ = True
         return self
 
-    def transform(self, texts: list[str]) -> np.ndarray:
+    def transform(self, texts: list[str], languages: list[str] | None = None) -> np.ndarray:
         """Return a feature matrix of shape ``(len(texts), n_features)``.
 
         Raw features before :meth:`fit`; globally standardised after (when
         ``standardize`` is on), so the schema/shape is identical either way.
         """
-        raw = self._raw_matrix(texts)
+        raw = self._raw_matrix(texts, languages)
         if self.fitted_ and self.standardize and raw.shape[0] > 0:
             return (raw - self.mean_) / self.std_
         return raw
 
     def fit_transform(self, texts: list[str], languages: list[str] | None = None) -> np.ndarray:
         """Convenience: :meth:`fit` then :meth:`transform`."""
-        return self.fit(texts, languages).transform(texts)
+        return self.fit(texts, languages).transform(texts, languages)
 
     def feature_names(self) -> list[str]:
         """Return the ordered feature names matching :meth:`transform` columns."""
@@ -369,10 +520,10 @@ class StylometricExtractor:
         trained fusion head (Phase 2, P1) and must never be shown as a calibrated
         verdict (non-negotiable #8: decision support, never accusation).
         """
-        raw = self._raw_matrix(texts)
-        if raw.shape[0] == 0:
+        if not texts:
             return np.zeros((0,), dtype=float)
-        cols = {name: i for i, name in enumerate(self._feature_names)}
+        raw = np.asarray([self._features_for_text(t) for t in texts], dtype=float)  # surface only
+        cols = {name: i for i, name in enumerate(_FEATURE_NAMES)}
         sent_burst = raw[:, cols["sent_len_burstiness"]]
         word_burst = raw[:, cols["word_len_burstiness"]]
         repeat = raw[:, cols["bigram_repeat_ratio"]]
@@ -380,6 +531,87 @@ class StylometricExtractor:
         # and provisional; the trained head replaces them.
         logit = 2.0 * (-sent_burst) + 1.0 * (-word_burst) + 3.0 * repeat
         return 1.0 / (1.0 + np.exp(-logit))
+
+
+class HeadA:
+    """The trained Head A: one standardise -> logistic regression per bucket.
+
+    Per bucket, not pooled: a feature's human baseline differs by language (mean
+    word length alone separates te from en), so a pooled model would spend its
+    capacity telling buckets apart. ``class_weight="balanced"`` because train is
+    not 1:1 — cm has 596 human against 82 machine.
+
+    ``predict`` returns P(machine), higher = more machine-like (score.py's column
+    convention).
+    """
+
+    def __init__(self, feature_names: Sequence[str], C: float = 1.0,
+                 class_weight: str | None = "balanced", max_iter: int = 5000) -> None:
+        self.feature_names = list(feature_names)
+        self.C = C
+        self.class_weight = class_weight
+        self.max_iter = max_iter
+        self.models: dict[str, Any] = {}
+
+    def _new_model(self) -> Any:
+        from sklearn.linear_model import LogisticRegression
+        from sklearn.pipeline import make_pipeline
+        from sklearn.preprocessing import StandardScaler
+
+        return make_pipeline(StandardScaler(), LogisticRegression(
+            C=self.C, class_weight=self.class_weight, max_iter=self.max_iter))
+
+    def fit(self, X: np.ndarray, y: np.ndarray, buckets: Sequence[str]) -> "HeadA":
+        buckets = np.asarray(buckets)
+        for bucket in sorted(set(buckets.tolist())):
+            mask = buckets == bucket
+            if len(set(y[mask].tolist())) < 2:
+                raise ValueError(f"bucket {bucket}: train split needs both classes")
+            self.models[bucket] = self._new_model().fit(X[mask], y[mask])
+        return self
+
+    def cv_auroc(self, X: np.ndarray, y: np.ndarray, buckets: Sequence[str], folds: int = 5,
+                 seed: int = 0) -> dict[str, tuple[float, float]]:
+        """Per-bucket stratified k-fold AUROC on train, ``(mean, std)`` — the
+        instability measure: a wide std means the fit depends on which rows it saw."""
+        from sklearn.model_selection import StratifiedKFold, cross_val_score
+
+        buckets = np.asarray(buckets)
+        out: dict[str, tuple[float, float]] = {}
+        for bucket in sorted(set(buckets.tolist())):
+            mask = buckets == bucket
+            cv = StratifiedKFold(n_splits=folds, shuffle=True, random_state=seed)
+            s = cross_val_score(self._new_model(), X[mask], y[mask], cv=cv, scoring="roc_auc")
+            out[bucket] = (float(s.mean()), float(s.std()))
+        return out
+
+    def predict(self, X: np.ndarray, buckets: Sequence[str]) -> np.ndarray:
+        buckets = np.asarray(buckets)
+        out = np.full(len(buckets), np.nan)
+        for bucket in sorted(set(buckets.tolist())):
+            mask = buckets == bucket
+            if bucket not in self.models:
+                raise KeyError(f"no Head A model for bucket {bucket!r}")
+            out[mask] = self.models[bucket].predict_proba(X[mask])[:, 1]
+        return out
+
+    def top_features(self, bucket: str, k: int = 5) -> list[tuple[str, float]]:
+        """The ``k`` largest standardised coefficients (+ = pushes towards machine)."""
+        coef = self.models[bucket][-1].coef_[0]
+        order = np.argsort(-np.abs(coef))[:k]
+        return [(self.feature_names[i], float(coef[i])) for i in order]
+
+    def save(self, path: str | Path) -> None:
+        import joblib
+
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        joblib.dump(self, path)
+
+    @staticmethod
+    def load(path: str | Path) -> "HeadA":
+        import joblib
+
+        return joblib.load(path)
 
 
 if __name__ == "__main__":
