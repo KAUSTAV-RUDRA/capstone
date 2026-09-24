@@ -16,7 +16,15 @@
 </form>
 
 {% if submitted %}
-<div class="alert alert-info">Placeholder: CSV parsing is wired in a later phase. Showing sample rows.</div>
+  {% if errors %}
+  <div class="alert alert-warning">
+    <div>Some rows could not be analysed:</div>
+    <ul class="mb-0">{% for e in errors %}<li>{{ e }}</li>{% endfor %}</ul>
+  </div>
+  {% endif %}
+  {% if not rows %}
+  <div class="alert alert-info">No rows analysed. The CSV needs a 'text' column (optional 'language', 'filename').</div>
+  {% endif %}
 {% endif %}
 
 <div class="table-responsive">

@@ -131,6 +131,29 @@ class Fuser:
         logreg = self.model.named_steps["logisticregression"]
         return dict(zip(self.feature_names_, logreg.coef_[0].tolist()))
 
+    def head_contributions(self, head_scores: "np.ndarray", buckets: Sequence[str]
+                          ) -> list[dict[str, float]]:
+        """Per-sample, per-HEAD (not bucket-one-hot) standardised contribution.
+
+        ``contribution = standardised_value * coefficient`` for each head
+        feature only -- the basis for "driving head" in the explanation
+        payload (whichever head's |contribution| is larger). Only defined for
+        ``method="logistic"``.
+        """
+        if self.method != "logistic":
+            raise ValueError("head_contributions is only defined for method='logistic'")
+        if self.model is None or self.head_names_ is None:
+            raise RuntimeError("Fuser is not fitted")
+        X = self._features(head_scores, buckets)
+        scaler, logreg = self.model.named_steps["standardscaler"], self.model.named_steps["logisticregression"]
+        z = scaler.transform(X)
+        contribution = z * logreg.coef_[0]
+        n_heads = len(self.head_names_)
+        return [
+            {name: float(contribution[row, i]) for i, name in enumerate(self.head_names_)}
+            for row in range(contribution.shape[0])
+        ]
+
     def save(self, path: str | Path) -> None:
         import joblib
 

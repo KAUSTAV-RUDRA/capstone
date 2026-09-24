@@ -601,6 +601,37 @@ class HeadA:
         order = np.argsort(-np.abs(coef))[:k]
         return [(self.feature_names[i], float(coef[i])) for i in order]
 
+    def top_deviating_features(self, x: np.ndarray, bucket: str, k: int = 5
+                               ) -> list[dict[str, float]]:
+        """The ``k`` features of ONE sample that deviate most from this bucket's
+        train-set norm, by |standardised deviation| x |coefficient| (a per-sample
+        explanation, unlike :meth:`top_features`'s model-level coefficients which
+        are the same for every sample in a bucket).
+
+        Args:
+            x: Shape ``(n_features,)`` raw (unstandardised) feature vector for
+                one text, in the same order as :attr:`feature_names`.
+            bucket: Which bucket's fitted scaler/model to use.
+            k: How many features to return.
+
+        Returns:
+            ``k`` dicts (largest |contribution| first), each with ``name``,
+            ``value`` (raw), ``z`` (standardised deviation) and ``contribution``
+            (``z * coefficient`` -- signed, + pushes towards machine).
+        """
+        pipeline = self.models[bucket]
+        scaler, logreg = pipeline[0], pipeline[-1]
+        x = np.asarray(x, dtype=float).reshape(1, -1)
+        z = scaler.transform(x)[0]
+        coef = logreg.coef_[0]
+        contribution = z * coef
+        order = np.argsort(-np.abs(contribution))[:k]
+        return [
+            {"name": self.feature_names[i], "value": float(x[0, i]), "z": float(z[i]),
+             "contribution": float(contribution[i])}
+            for i in order
+        ]
+
     def save(self, path: str | Path) -> None:
         import joblib
 

@@ -10,6 +10,7 @@ Phase 3 (per-bucket routing).
 from __future__ import annotations
 
 import re
+import unicodedata
 from typing import Any
 
 #: Closed-class romanised Hindi: postpositions, copulas, negation, pronouns,
@@ -32,7 +33,18 @@ ROMANISED_HINDI_FUNCTION_WORDS: frozenset[str] = frozenset(
 #: so a generator that bolts them onto English sentences must not score as mixed.
 EXCLUDED_FILLERS: frozenset[str] = frozenset({"yaar", "yar", "bhai"})
 
+#: Runtime bucket-assignment floor for Latin-script code-mixed text: the same
+#: quantity (romanised_hindi_share) and the same value as the corpus-construction
+#: source-inclusion gate (configs/data.yaml `min_hindi_word_ratio: 0.3`) — a
+#: text needs at least this much Hindi running through its grammar to be routed
+#: to the `cm` calibration bucket rather than `en`.
+DEFAULT_CODEMIX_MIN_RATIO = 0.3
+
 _LATIN_WORD_RE = re.compile(r"[a-z]+")
+
+#: Unicode block ranges used for script-based language detection.
+_DEVANAGARI_RANGE = (0x0900, 0x097F)
+_TELUGU_RANGE = (0x0C00, 0x0C7F)
 
 
 def romanised_hindi_share(text: str) -> float:
@@ -49,44 +61,106 @@ def romanised_hindi_share(text: str) -> float:
     return sum(word in ROMANISED_HINDI_FUNCTION_WORDS for word in words) / len(words)
 
 
+def _script_counts(text: str) -> dict[str, int]:
+    """Count characters falling in each recognised script block."""
+    counts = {"devanagari": 0, "telugu": 0, "latin": 0}
+    for ch in text:
+        code = ord(ch)
+        if _DEVANAGARI_RANGE[0] <= code <= _DEVANAGARI_RANGE[1]:
+            counts["devanagari"] += 1
+        elif _TELUGU_RANGE[0] <= code <= _TELUGU_RANGE[1]:
+            counts["telugu"] += 1
+        elif ch.isalpha() and ch.isascii():
+            counts["latin"] += 1
+    return counts
+
+
 def detect_language(text: str) -> str:
-    """Detect the dominant language/script of a text."""
-    # TODO(phase-2 step-2.2.3): implement language detection.
-    raise NotImplementedError
+    """Detect the dominant script/language of a text: ``en`` / ``hi`` / ``te``.
+
+    Script-based, not calibration-bucket-aware: Latin-script Hindi (Hinglish)
+    detects as ``en`` here — :func:`assign_bucket` is what routes it to ``cm``
+    using :func:`romanised_hindi_share` on top of this.
+    """
+    counts = _script_counts(text)
+    if counts["devanagari"] >= counts["telugu"] and counts["devanagari"] > 0:
+        return "hi"
+    if counts["telugu"] > 0:
+        return "te"
+    return "en"
 
 
 def code_mix_ratio(text: str) -> float:
-    """Return the fraction of tokens from the embedded language (0.0-1.0)."""
-    # TODO(phase-2 step-2.2.3): compute code-mix ratio.
-    raise NotImplementedError
+    """Return the fraction of tokens from the embedded language (0.0-1.0).
+
+    For the Romanised code-mixed case (the project's ``cm`` bucket) this is
+    :func:`romanised_hindi_share`: the share of Latin-script words that are
+    romanised Hindi function words.
+    """
+    return romanised_hindi_share(text)
 
 
 def normalise_script(text: str) -> str:
-    """Normalise Indic scripts (feeds script-aware curvature, Patent 2)."""
-    # TODO(phase-2 step-2.2.3): implement script normalisation.
-    raise NotImplementedError
+    """Normalise Indic scripts (feeds script-aware curvature, Patent 2).
+
+    Unicode NFC normalisation (composes combining marks into precomposed
+    Devanagari/Telugu characters) plus whitespace trimming. Full script-aware
+    normalisation (transliteration variants, ZWJ handling per
+    docs/progress.md 2026-09-22) is Patent 2 scope beyond this sprint.
+    """
+    return unicodedata.normalize("NFC", text).strip()
 
 
-def is_romanised(text: str) -> bool:
-    """Return True if the text is Romanised Indic (e.g. Hinglish in Latin script)."""
-    # TODO(phase-2 step-2.2.3): detect romanisation.
-    raise NotImplementedError
+def is_romanised(text: str, config: dict | None = None) -> bool:
+    """Return True if the text is Romanised Indic (e.g. Hinglish in Latin script).
+
+    True when the dominant script is Latin (no Devanagari/Telugu) but the
+    romanised-Hindi function-word share clears the code-mix floor.
+    """
+    counts = _script_counts(text)
+    if counts["devanagari"] > 0 or counts["telugu"] > 0:
+        return False
+    threshold = (config or {}).get("codemix_min_ratio", DEFAULT_CODEMIX_MIN_RATIO)
+    return romanised_hindi_share(text) >= threshold
 
 
-def assign_bucket(text: str) -> str:
-    """Assign one of the four buckets (``en`` / ``hi`` / ``te`` / ``cm``)."""
-    # TODO(phase-2 step-2.2.3): map detection result to a calibration bucket.
-    raise NotImplementedError
+def assign_bucket(text: str, config: dict | None = None) -> str:
+    """Assign one of the four calibration buckets (``en`` / ``hi`` / ``te`` / ``cm``).
+
+    Devanagari-dominant -> ``hi``; Telugu-dominant -> ``te``; Latin-dominant
+    with the romanised-Hindi share at or above the code-mix floor -> ``cm``;
+    otherwise -> ``en``.
+    """
+    counts = _script_counts(text)
+    if counts["devanagari"] >= counts["telugu"] and counts["devanagari"] > 0:
+        return "hi"
+    if counts["telugu"] > 0:
+        return "te"
+    if is_romanised(text, config):
+        return "cm"
+    return "en"
 
 
 class LanguageIdentifier:
     """Bundles detection, normalisation, and bucket assignment for the pipeline."""
 
     def __init__(self, config: dict | None = None) -> None:
-        # TODO(phase-2 step-2.2.3): load any resources (fastText/stanza etc.).
-        raise NotImplementedError
+        """Args:
+        config: Loaded config dict; only ``codemix_min_ratio`` is read here
+            (defaults to :data:`DEFAULT_CODEMIX_MIN_RATIO`). Pure script/lexicon
+            detection — no external models to load.
+        """
+        self.config = config or {}
 
     def identify(self, text: str) -> dict[str, Any]:
         """Return ``{language, bucket, code_mix_ratio, script, romanised}``."""
-        # TODO(phase-2 step-2.2.3): full preprocessing summary for one text.
-        raise NotImplementedError
+        normalised = normalise_script(text)
+        language = detect_language(normalised)
+        bucket = assign_bucket(normalised, self.config)
+        return {
+            "language": language,
+            "bucket": bucket,
+            "code_mix_ratio": code_mix_ratio(normalised),
+            "script": "devanagari" if language == "hi" else "telugu" if language == "te" else "latin",
+            "romanised": is_romanised(normalised, self.config),
+        }

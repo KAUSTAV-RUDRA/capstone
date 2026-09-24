@@ -5,6 +5,90 @@ Newest entries at the top.
 
 ---
 
+## 2026-09-24 — Day 5: the webapp is wired to the real pipeline (rubric item 3)
+
+Review-2 sprint Day 5. The Django demo/consultancy layer no longer returns
+hardcoded placeholders — `webapp/detector/services.py` now runs the full
+language_id -> Head A + Head B -> fusion -> temperature -> conformal ->
+abstention -> explanation chain built on Day 2-4.
+
+1. **`src/features/language_id.py`** implemented for real: script detection
+   by Unicode block (Devanagari/Telugu/Latin), `code_mix_ratio` (reuses
+   `romanised_hindi_share`), `assign_bucket` (Devanagari -> hi, Telugu -> te,
+   Latin + romanised-Hindi share >= 0.3 -> cm, else en — the same floor as
+   the corpus-construction gate, `configs/data.yaml`'s `min_hindi_word_ratio`),
+   `normalise_script` (NFC), `is_romanised`, and `LanguageIdentifier.identify()`.
+   No models to load — pure script/lexicon logic, so it's instant.
+2. **`webapp/detector/services.py`** rewritten. `analyse_text()`: routes to a
+   bucket (explicit choice honoured, `auto` falls back to detection), runs
+   Head A (`StylometricExtractor` + the saved `HeadA` model) and Head B
+   (`CurvatureScorer` on mGPT), fuses via the saved `fused_ab` `Fuser`, applies
+   that bucket's temperature and conformal tau from `results/calibration.json`
+   (new: `scripts/export_calibration.py`, exports the Day-4 `fit_full_pipeline`
+   artefacts into a small static snapshot so the webapp never re-fits sklearn
+   at request time), and reuses the real, tested `AbstentionGate` (not a
+   re-implementation) for the three-way verdict. Head C is excluded, per
+   `docs/results/headc_diagnosis.md`. `driving_head` and the top-5 stylometric
+   features come from two new explainability methods added where the model
+   lives: `Fuser.head_contributions()` (per-sample standardised
+   `z * coefficient` per head) and `HeadA.top_deviating_features()` (per-sample
+   deviation from the bucket's train norm — distinct from the existing
+   `top_features()`, which is model-level and identical for every sample in a
+   bucket). Every heavy object (Head A, the mGPT scorer, the fuser, the
+   calibration snapshot) loads once into a module-level cache on first use,
+   never per request.
+3. **Result page shows real verdicts**; `views.py`'s `analyse` already
+   persisted every `Decision` — just needed `services.analyse_text` to stop
+   lying.
+4. **Batch page**: real CSV parsing (`text` required, `language`/`filename`
+   optional, capped at 200 rows, bad rows reported not silently dropped) via
+   `services.analyse_batch()`; each row is persisted as its own
+   Submission+Decision so the dashboard's real-Decision-row counts include
+   batch runs too. Dashboard's aggregation queries were already real (just
+   had nothing to count before).
+5. `src/` stays at zero Django imports (checked: `grep -rn "django" src/` ->
+   nothing); `services.py` is still the only file under `webapp/` importing
+   `src`.
+
+**A real gotcha, not a code bug:** the first end-to-end run stalled for
+5+ minutes with near-zero CPU growth — `huggingface_hub` making an HTTPS etag
+round-trip per model load to check for updates, even with mGPT/MuRIL already
+warm in the local cache, and this dev box's connection to the HF CDN is slow.
+Fixed with `os.environ.setdefault("HF_HUB_OFFLINE", "1")` (+
+`TRANSFORMERS_OFFLINE`) in `services.py` — `setdefault`, so an operator who
+wants online revalidation can still override it before starting Django. After
+the fix: first request ~23-29s (cold model load), subsequent requests <10s
+warm, correct bucket routing and plausible verdicts on hand-checked en/hi/te/cm
+samples.
+
+Tests: `webapp/detector/tests.py` (new, 10 tests — page smoke, analyse
+persists Submission+Decision, batch CSV parsing incl. the missing-column and
+empty-row cases, dashboard aggregation reflects real decisions, language
+resolution) all mock `services.analyse_text` so they run in 0.3s without
+loading any model; `tests/features/test_language_id.py` filled in for real
+(8 tests, was a stub). `pytest tests/` still at 134 passed / 12 pre-existing
+unrelated stub failures (baselines, data schema/loaders, io/logging/config
+scaffolds, explain.py — none touched today).
+
+**Verify:**
+```
+python manage.py test webapp.detector          # 10 passed, offline, no models loaded
+pytest tests/features/test_language_id.py tests/fusion/test_fuser.py tests/features/test_stylometric.py
+python -m scripts.export_calibration --config configs/default.yaml   # writes results/calibration.json
+python manage.py runserver                     # then use the Analyse page for real
+```
+Needs, ahead of time (all gitignored, regenerate via the named command):
+`results/models/headA.joblib` (`python -m src.eval.score --column headA`),
+`results/models/fuser_ab.joblib` (`python -m experiments.exp04_fusion ...`),
+`results/calibration.json` (`python -m scripts.export_calibration ...`).
+
+**Next:** pdf/docx file upload extraction is still `.txt`-only in the
+analyse-page upload path (views.py's existing TODO, not in this sprint's
+5-item list); batch CSV caps at 200 rows with no pagination/async job queue,
+fine for a demo, not for a real consultancy-scale batch.
+
+---
+
 ## 2026-09-24 — Day 4: fusion, calibration, abstention, T1/T2/T5/T6/F1/F2 (headC excluded)
 
 Review-2 sprint Day 4, all from `results/scores.parquet` (qwen7b only), no GPU.

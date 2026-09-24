@@ -61,3 +61,8 @@ def test_head_a_per_bucket_fit_predict_and_roundtrip(tmp_path) -> None:
     assert np.allclose(HeadA.load(tmp_path / "h.joblib").predict(X, buckets), p)
     with pytest.raises(KeyError):
         head.predict(X[:1], ["te"])
+
+    dev = head.top_deviating_features(X[y == 1][0], "en", k=2)
+    assert len(dev) == 2
+    assert {"name", "value", "z", "contribution"} <= dev[0].keys()
+    assert abs(dev[0]["contribution"]) >= abs(dev[1]["contribution"])

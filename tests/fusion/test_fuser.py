@@ -53,6 +53,19 @@ def test_decision_function_monotonic_with_predict_proba() -> None:
     assert np.allclose(1 / (1 + np.exp(-logits)), probs)
 
 
+def test_head_contributions_shape_and_sign() -> None:
+    head_scores, labels, buckets, vocab = _toy_data()
+    fuser = Fuser(buckets=vocab).fit(head_scores, labels, buckets, head_names=["headA", "headB"])
+    contributions = fuser.head_contributions(head_scores, buckets)
+    assert len(contributions) == len(labels)
+    assert set(contributions[0]) == {"headA", "headB"}
+    # headA is informative (higher score -> more machine); a high-headA machine
+    # row should get a positive headA contribution more often than not.
+    machine_idx = np.flatnonzero(labels == 1)
+    positive = sum(1 for i in machine_idx if contributions[i]["headA"] > 0)
+    assert positive > len(machine_idx) * 0.7
+
+
 def test_gbm_has_no_coefficients() -> None:
     head_scores, labels, buckets, vocab = _toy_data()
     fuser = Fuser(method="gbm", buckets=vocab).fit(head_scores, labels, buckets)
