@@ -262,12 +262,16 @@ machine_corpus:
       # does not generate te at all (drop_buckets_by_generator below).
       mistral: {hi: 0.88}
       # llama measured 2026-09-28, same probe method: hi 0.61 (mean 0.62,
-      # p10 0.44, p90 0.81), te 0.52 (mean 0.66, p10 0.26, p90 1.09, 1/12 at
-      # cap — a lower bound), cm 1.17 (mean 1.51) already close to human at
-      # ask = bin with no compensation. llama is the sole held-out generator
-      # (decisions.md 2026-09-28, phi dropped entirely) and cleared its raw
-      # 12-row probe on all three buckets it carries.
-      llama: {hi: 0.61, te: 0.52, cm: 1.17}
+      # p10 0.44, p90 0.81), cleared its raw 12-row probe AND the 24-row gate.
+      # te (0.52 raw) and cm (1.17 raw) both cleared the 12-row raw probe but
+      # FAILED their 24-row gate (te machine/human 0.37 despite the ratio
+      # applied — compensation assumes a proportional response the Telugu
+      # ask doesn't get, same non-response gemma's te regression already
+      # showed at slope 0.36; cm machine/human 1.97, high-variance short-bin
+      # over/under-production). No ratio entry for either: a generator that
+      # does not generate a bucket carries no ratio for it (decisions.md
+      # 2026-09-24, mistral/te). llama generates hi only.
+      llama: {hi: 0.61}
     # cm asks from the human passage's own length, not its bin, and inflates only
     # passages of 40+ words (ask = human / 0.75); compliance_ratio is not applied to
     # it. Probed 2026-09-21: 0-40 at 1.19, 40+ at 1.09 (docs/progress.md).
@@ -339,12 +343,23 @@ machine_corpus:
   # phi is no longer a generator at all (dropped 2026-09-28, decisions.md):
   # three of its four buckets failed structurally (cm instruction compliance,
   # te cap-pinning at 20.3 tok/word, hi a 1.47x over-production no ratio can
-  # correct), leaving only one usable bucket out of four. llama covers hi, te
-  # and cm cleanly on its own raw-compliance probe, so llama alone carries
-  # held-out generalisation (non-negotiable #4) rather than spending a sitting
-  # fixing phi's template for one bucket.
+  # correct), leaving only one usable bucket out of four.
+  #
+  # llama / cm and te: both cleared their 12-row raw-compliance probe but
+  # failed their 24-row gate (decisions.md 2026-09-28). cm: machine/human
+  # 1.97, high-variance short-bin over/under-production (0.21-6.12x on
+  # human < 40 words), deferred as an open short-passage-construction
+  # question rather than a settled per-generator defect. te: machine/human
+  # 0.37 despite the measured 0.52 ratio being applied — Telugu compensation
+  # assumes a proportional response to the ask that this generator (like
+  # gemma, slope 0.36, 2026-09-23) doesn't give. llama generates hi only, so
+  # T3 (held-out generalisation, non-negotiable #4) currently has held-out
+  # rows for hi alone; cm's held-out side is deferred (not regenerated, not
+  # abandoned) and te has no held-out generator at all — both go in
+  # Limitations.
   drop_buckets_by_generator:
     mistral: [te]
+    llama: [cm, te]
   selection_dir: data/processed/selection
   # `ollama` tags resolve to Q4_K_M where such a tag exists (checked against
   # registry.ollama.ai); the default gemma2:9b tag is Q4_0, hence its explicit
