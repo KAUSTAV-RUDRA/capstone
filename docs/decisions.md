@@ -1619,6 +1619,130 @@ report; `configs/data.yaml` — `machine_corpus.generators` has no `phi` key,
 
 ---
 
+## 2026-09-28 (later still) — llama/cm: deferred, not failed-and-abandoned
+
+The bulk run (`generate --generator llama --buckets cm,hi,te`) hit cm's 24-row
+gate first and failed it: median machine/human ratio **1.97** (mean 2.44, p90
+5.12, 75 % of rows above 1.25), against the 12-passage raw probe's 1.09
+median. Split by length bin:
+
+| bin | n | ratio median | range |
+|---|---|---|---|
+| human < 40 words | 15 | **2.22** | 0.21 – 6.12 |
+| human ≥ 40 words | 9 | 1.32 | 0.66 – 2.27 |
+
+The failure is concentrated entirely in the short bin, and it is *variance*,
+not *bias*: individual short-passage rows range from 15 words (against an ask
+of 25) to 110 words on the same ask, both directions represented, no
+consistent over- or under-shoot to correct with a ratio or a template tweak.
+This is the short-passage defect `probe_compliance.py`'s docstring already
+names from 2026-09-20 ("a head-of-list sample hid cm's short-passage defect")
+— a 12-passage probe can miss it by luck of the draw; this 24-row stratified
+gate sample didn't.
+
+**Not investigated further, on instruction.** The 24 rows are moved to
+`data/raw/discarded/llama__cm__gate-failed-2026-09-28.jsonl` (kept for the
+writeup, not deleted); `data/raw/machine/llama.jsonl` is now empty of cm rows
+so a resume starts clean rather than re-reading and re-failing the same gate.
+
+**Status: deferred for llama, not failed-and-abandoned.** The distinction
+matters because it differs in kind from every other exclusion recorded today
+(mistral/te's cap-pinning, phi/cm's instruction compliance, phi/te's
+cap-pinning, phi/hi's over-production) — those are properties of a specific
+generator's fit to a bucket. cm's 20-word-passage variance instead looks like
+it could be a property of *short-passage instruction following under a
+word-count ask*, independent of which model is asked: qwen needed a dedicated
+sentence-count floor fix for cm short passages (`sentence_target`,
+2026-09-18) precisely because the naive template drove short cm passages to
+4.0x; llama's failure, high-variance rather than one-directional, may be the
+same underlying instability showing up differently. Whether it recurs on
+llama specifically, or is a general short-cm-passage phenomenon, is unresolved
+and not chased this session — **goes in Limitations** as an open note on
+prompt-controlled corpus construction at short lengths, not as a settled
+per-generator exclusion the way phi's buckets were.
+
+cm's held-out coverage is therefore open pending this bucket being revisited,
+not zero by design and not resolved by llama the way hi/te are expected to be.
+
+**Verify:** `data/raw/discarded/llama__cm__gate-failed-2026-09-28.jsonl` (24
+rows); `data/raw/machine/llama.jsonl` absent/empty until te/hi regenerate it.
+
+---
+
+## 2026-09-28 (later still) — te has no held-out generator: compensation assumes a response that Telugu doesn't give
+
+llama's te gate failed next: median machine/human **0.37** (mean 0.46, p90
+0.78), still under-producing after `compliance_ratio_by_generator.llama.te`
+(0.52, measured the same session on a 12-passage raw probe) was applied. The
+ratio should have corrected the ask to land near 1.0; it landed at little
+over a third of human length instead.
+
+**Why the correction didn't take.** Compensation (`compensated_words`)
+assumes output scales with the ask: inflate the ask by `1/ratio` and the
+model writes proportionally more. That assumption is exactly what gemma's te
+regression already showed failing, measured 2026-09-23 (above): output
+regressed on ask gave a **slope of 0.36** words-out per word-of-ask, against
+hi's near-proportional 0.65 — gemma writes ~69 words plus roughly a third of
+whatever is asked, so inflating the ask moves the output much less than the
+inflation factor assumes. llama's 24-row gate result is the same non-response
+in a different generator: a ratio measured at 0.52 (already accounting for
+some of this) still left the *gated, ask-inflated* run at 0.37, well short of
+where 1/0.52 inflation should have landed it if output scaled with the ask.
+
+**Three of the four generators now show the same shape of te failure, for
+three different reasons, none of them a wrong ratio:**
+
+| generator | te outcome | mechanism |
+|---|---|---|
+| mistral | never tested for over/under-production | tokenizer reads Telugu at 13.309 tok/word; every `num_predict` pinned at the 3600 cap before compliance could even be measured (2026-09-24) |
+| gemma | passed on the gate's median, but flagged | slope 0.36, intercept 69 — a shallow, non-proportional response to the ask; the long tail under-produces even though the median clears (2026-09-23) |
+| llama | failed the gate outright | ratio measured at 0.52, applied, still landed at 0.37 — the same shallow-response shape as gemma's, just severe enough to fail the median too |
+
+qwen (the fourth, seen generator) is the only one whose te ratio (0.62) was
+ever a clean, working correction — and it was measured and frozen before this
+line of investigation existed. Telugu is not merely harder to length-match;
+for most of these models the *mechanism* compensation relies on — write more
+when asked for more — is weak or absent, and a ratio computed from a single
+probe (a point estimate of a relationship that isn't linear) cannot be
+expected to generalise the way it does for hi or en.
+
+| Decision | Value | Why |
+|---|---|---|
+| llama does not generate `te` | (pending: `drop_buckets_by_generator` update deferred until the concurrently-running `llama --buckets hi` run finishes — the 24 failed te rows are not yet moved out of `data/raw/machine/llama.jsonl`, to avoid rewriting a file a live process is still appending to) | Gate failure at 0.37 despite a measured, applied compliance ratio; compensation's proportional-response assumption does not hold for this generator/bucket either. |
+
+### Consequence: te has no held-out generator
+
+qwen (seen, frozen) and gemma (seen, median passes with a flagged long tail)
+are te's only two working sources. Both held-out generators have now failed
+te for independent reasons — mistral was never even a held-out candidate
+(seen role) but is the third generator to fail it regardless. **te's held-out
+coverage is zero.** Non-negotiable #4's generalisation claim (T3) therefore
+covers **en, hi, and cm only** — te is a seen-generator-only bucket, the same
+status structurally as the te coverage gap already recorded for mistral
+(2026-09-24), except now no held-out generator covers it at all rather than
+two-of-three seen generators covering it.
+
+This is a second, compounding instance of the session's central finding
+(generator-bucket fit is a property of the pair): te specifically is now
+0-for-3 on every generator that wasn't qwen, each failing by a different
+route (cap-pinned, shallow-response-median-passes, shallow-response-median-
+fails). **Goes in Limitations** alongside the mistral/te and phi/cm/te notes:
+
+> Held-out generalisation (T3) is evaluated against llama on en, hi and cm
+> only. llama's `te` gate failed (machine/human 0.37) despite an applied,
+> measured compliance ratio; Telugu length compensation assumes output scales
+> with the ask, and te's low, often sub-proportional response to that ask
+> (gemma's regression slope 0.36, 2026-09-23) means no held-out generator in
+> this study produced usable Telugu machine text. te rests entirely on the
+> two seen generators (qwen, gemma) that do.
+
+**Verify:** `results/probes/llama__hi-te-cm__askbin.jsonl` (raw ratio 0.52);
+gate-failure output from `python -m src.data.generate --generator llama
+--buckets te,hi --max-minutes 240` (median 0.37, 24 rows). File cleanup and
+`drop_buckets_by_generator` update are pending, not yet applied.
+
+---
+
 ## Decisions still open (fill as resolved)
 
 - [ ] Phase 0.1 — what "patent" means (disclosure / IPR-cell / IPO provisional).
