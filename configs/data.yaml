@@ -35,8 +35,12 @@ corpus:
 min_human_calibration_per_bucket: 1000
 min_human_train_test_per_bucket: 1500
 
-# Held-outs (non-negotiable #4): 2 unseen generators + 1 domain, test only.
-heldout_generators: [llama, phi]   # aliases from machine_corpus.generators below
+# Held-outs (non-negotiable #4): unseen generator(s) + 1 domain, test only.
+# Locked 2026-09-13 at 2 generators (llama, phi); phi dropped entirely
+# 2026-09-28 (three of its four buckets failed structurally — decisions.md),
+# leaving llama as the sole held-out generator. T3 now measures generalisation
+# to one unseen model, not a family of them; see decisions.md for the cost.
+heldout_generators: [llama]   # aliases from machine_corpus.generators below
 heldout_domain: null
 
 # Adversarial attack families (matches RAID/DetectRL practice).
@@ -257,6 +261,13 @@ machine_corpus:
       # p10 0.77, p90 1.19), writing close to the ask. No te entry — mistral
       # does not generate te at all (drop_buckets_by_generator below).
       mistral: {hi: 0.88}
+      # llama measured 2026-09-28, same probe method: hi 0.61 (mean 0.62,
+      # p10 0.44, p90 0.81), te 0.52 (mean 0.66, p10 0.26, p90 1.09, 1/12 at
+      # cap — a lower bound), cm 1.17 (mean 1.51) already close to human at
+      # ask = bin with no compensation. llama is the sole held-out generator
+      # (decisions.md 2026-09-28, phi dropped entirely) and cleared its raw
+      # 12-row probe on all three buckets it carries.
+      llama: {hi: 0.61, te: 0.52, cm: 1.17}
     # cm asks from the human passage's own length, not its bin, and inflates only
     # passages of 40+ words (ask = human / 0.75); compliance_ratio is not applied to
     # it. Probed 2026-09-21: 0-40 at 1.19, 40+ at 1.09 (docs/progress.md).
@@ -305,11 +316,13 @@ machine_corpus:
   bucket_limits_by_generator:
     gemma:   {hi: 250, te: 200}
     mistral: {hi: 250, te: 200}
-  # Buckets a HELD-OUT generator skips entirely. llama and phi are test-only and
-  # exist to prove unseen-generator generalisation (non-negotiable #4); hi, te
-  # and cm carry that test, and en is already the best-covered bucket in the
-  # corpus, so generating it twice more buys nothing (decisions.md 2026-09-23).
-  # Keyed on the role, so it follows a generator whose role changes.
+  # Buckets a HELD-OUT generator skips entirely. llama is test-only and exists
+  # to prove unseen-generator generalisation (non-negotiable #4); hi, te and cm
+  # carry that test, and en is already the best-covered bucket in the corpus,
+  # so generating it twice more buys nothing (decisions.md 2026-09-23). phi was
+  # also held-out but is dropped entirely as a generator (decisions.md
+  # 2026-09-28); llama is now the sole held-out generator. Keyed on the role,
+  # so it follows a generator whose role changes.
   heldout_drop_buckets: [en]
   # Buckets a NAMED generator does not generate, whatever its role. Separate
   # from heldout_drop_buckets because the reason is the model, not the role.
@@ -323,17 +336,26 @@ machine_corpus:
   # qwen (400) and gemma (200) instead: 600 rows across two seen generators.
   # Generator coverage per bucket is reported, not required to be uniform
   # (decisions.md 2026-09-24).
+  # phi is no longer a generator at all (dropped 2026-09-28, decisions.md):
+  # three of its four buckets failed structurally (cm instruction compliance,
+  # te cap-pinning at 20.3 tok/word, hi a 1.47x over-production no ratio can
+  # correct), leaving only one usable bucket out of four. llama covers hi, te
+  # and cm cleanly on its own raw-compliance probe, so llama alone carries
+  # held-out generalisation (non-negotiable #4) rather than spending a sitting
+  # fixing phi's template for one bucket.
   drop_buckets_by_generator:
     mistral: [te]
   selection_dir: data/processed/selection
   # `ollama` tags resolve to Q4_K_M where such a tag exists (checked against
-  # registry.ollama.ai); the default gemma2:9b and phi3.5:3.8b tags are Q4_0,
-  # hence their explicit tags. llama3.1 publishes no -instruct or -q4_K_M tag,
-  # so llama uses the plain llama3.1:8b (the locally pulled one).
+  # registry.ollama.ai); the default gemma2:9b tag is Q4_0, hence its explicit
+  # tag. llama3.1 publishes no -instruct or -q4_K_M tag, so llama uses the
+  # plain llama3.1:8b (the locally pulled one).
   # `tokenizer` is the HF repo whose tokenizer the GGUF carries (fertility budget).
+  # phi (phi3.5:3.8b-mini-instruct-q4_K_M) was held-out slot 1 and is dropped
+  # entirely as of 2026-09-28 — three of its four buckets failed structurally;
+  # see decisions.md. llama is now the sole held-out generator.
   generators:
     qwen7b:  {role: seen,    slot: 0, ollama: "qwen2.5:7b-instruct",              hf: "Qwen/Qwen2.5-7B-Instruct",           tokenizer: "Qwen/Qwen2.5-7B-Instruct"}
     gemma:   {role: seen,    slot: 1, ollama: "gemma2:9b-instruct-q4_K_M",        hf: "google/gemma-2-9b-it",               tokenizer: "google/gemma-2-9b-it"}
     mistral: {role: seen,    slot: 2, ollama: "mistral:7b-instruct",              hf: "mistralai/Mistral-7B-Instruct-v0.3", tokenizer: "mistralai/Mistral-7B-Instruct-v0.3"}
     llama:   {role: heldout, slot: 0, ollama: "llama3.1:8b",                     hf: "meta-llama/Llama-3.1-8B-Instruct",   tokenizer: "meta-llama/Llama-3.1-8B-Instruct"}
-    phi:     {role: heldout, slot: 1, ollama: "phi3.5:3.8b-mini-instruct-q4_K_M", hf: "microsoft/Phi-3.5-mini-instruct",    tokenizer: "microsoft/Phi-3.5-mini-instruct"}

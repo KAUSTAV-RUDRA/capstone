@@ -1437,6 +1437,188 @@ tests/features/test_semantic.py` → 3 + 4 passed.
 
 ---
 
+## 2026-09-28 — phi does not generate `cm`: instruction compliance, not the template
+
+**What the 24-row gate run found.** phi's cm gate failed hard: length ratio 3.57
+against human, 100 % of rows at the token cap, 14 of 24 rows carrying an emoji
+despite the template's "No emoji" clause.
+
+**Probe 1 — is this a compliance-ratio problem?** `probe_compliance.py`, 12
+passages, current template, ask = bin, **no compensation** (`results/probes/
+phi__cm__askbin.jsonl`):
+
+| | machine/ask | mean | p10 | p90 | machine/human | at cap |
+|---|---|---|---|---|---|---|
+| cm | **4.64** | 4.20 | 3.01 | 5.18 | 4.50 | 8/12 (67 %) |
+
+No. A compliance ratio only ever inflates the ask (`compensated_words` never
+shrinks it), so the smallest value on the table is 1.0 — and 1.0 already
+overshoots by 4.5×. Whatever produced the 3.57×/100 %-at-cap numbers in the
+24-row run, it was the *compensated* ask making an already-runaway model
+worse, not a mistuned ratio. The length side has to move at the template
+level (or phi drops cm), not through `compliance_ratio_by_generator`.
+
+**Probe 2 — is the emoji rate a template-wording problem?** Human cm is 0 of
+2,200 rows with an emoji, so any non-zero machine rate is a class shortcut, not
+noise. A paired two-variant probe (`results/probes/phi_cm_emoji_probe.jsonl`,
+same 12 passages, ask = bin, no compensation, so the length lever is held
+constant and only the constraint wording changes):
+
+| variant | emoji rows |
+|---|---|
+| `v0_current` — existing template, "No emoji" mid-prompt | 7/12 |
+| `v1_end` — same content, moved to the end and strengthened to "Plain text only: no emoji, no emoticons, no symbols standing in for words" | 6/12 |
+
+58 % → 50 %. Repositioning the constraint to the most recency-weighted part of
+the prompt *and* strengthening its wording moved the rate by one row. That
+rules out placement and phrasing as the cause: phi is not failing to notice or
+parse the instruction, it is not complying with it. This is model behaviour,
+not a prompt-engineering gap — the same qualitative distinction the mistral/te
+finding drew between a structural cap and a template fix (2026-09-24, above).
+
+| Decision | Value | Why |
+|---|---|---|
+| phi does not generate `cm` | `drop_buckets_by_generator: {mistral: [te], phi: [cm, te]}` | Two independent, unfixable-at-the-template-level failures: length (4.64× ask median under zero compensation, 67 % at cap) and emoji (a controlled two-variant probe shows compliance, not wording, is the cause). |
+| phi's cm rows from the failed gate run | Moved to `data/raw/discarded/phi__cm__gate-failed-2026-09-28.jsonl` | Kept for the writeup, not deleted; same pattern as `gemma_cm_gateprobe_v0.jsonl` and `gemma__hi__gate-failed-2026-09-23.jsonl`. |
+| phi's cm compliance ratio | Never set | Same reasoning as mistral/te (2026-09-24): a generator that does not generate a bucket carries no ratio for it. |
+
+### Finding: generator-bucket fit is a property of the pair, not the language
+
+Two of the five generators now fail a bucket each, for structurally unrelated
+reasons. **mistral/te** fails because its tokenizer's Telugu fertility (13.309
+tokens/word) pins every generation budget at the context cap — the *budget*,
+not the *passage*, sets the length, so no template or compliance ratio can
+reach it. **phi/cm** fails because the model does not comply with an
+instruction it demonstrably can read (repositioning and strengthening it moved
+the rate by less than one row in twelve) — an *instruction-compliance* limit,
+not a capacity or budget one. Both symptoms look similar from the gate's
+output (length and/or emoji failures on the probe), but the mechanism, and
+therefore the fix that doesn't exist, is different in each case. The lesson
+this sets for the rest of generation: a bucket failing on one generator is not
+evidence about the bucket, and does not predict which other generator/bucket
+pairs will fail or why — each has to be probed and diagnosed on its own terms,
+the same way mistral's te and phi's cm were.
+
+### phi does not generate `te` either: the same cap-pinning as mistral/te
+
+Probed the same session (`probe_compliance.py`, 12 passages per bucket,
+current templates, ask = bin, no compensation, `results/probes/
+phi__hi-te__askbin.jsonl`):
+
+| bucket | machine/ask | mean | p10 | p90 | machine/human | at cap |
+|---|---|---|---|---|---|---|
+| hi | **1.60** | 1.65 | 1.21 | 2.09 | 1.47 | 1/12 (8 %) |
+| te | **3.33** | 4.16 | 2.99 | 5.33 | 3.49 | 8/12 (67 %) |
+
+te's signature is the mistral/te finding again, not a new one: phi's
+tokenizer reads Telugu at **20.286 tokens/word** (worse than mistral's
+13.309), and the probe log shows `num_predict` computed to **3600..3600 for
+every one of the 12 passages** — the budget, not the passage, sets the
+length, so no template or compliance ratio reaches it. `phi: [cm, te]` added
+to `drop_buckets_by_generator`, same mechanism and same reasoning as
+`mistral: [te]` (2026-09-24, above). **phi now generates `hi` only.**
+
+hi is a genuine, milder overshoot (1.47× human even with the ratio clamped
+to 1.0) rather than a cap artifact — only 1/12 rows hit the cap. Whether that
+clears the gate depends on the template, not a ratio; hi generation was not
+launched this session pending that check and pending llama's three-bucket
+numbers below.
+
+### Coverage — cm, and what zero held-out coverage costs T3
+
+cm is covered by **qwen7b (701, seen) + gemma (seen) + mistral (seen)** on the
+seen side. On the held-out side: see the next entry — phi is dropped
+entirely, and llama's raw probe clears all three of hi, te and cm, so llama
+alone carries held-out coverage for every bucket that needs it rather than cm
+being left at zero.
+
+**Verify:** `results/probes/phi__cm__askbin.jsonl`, `results/probes/
+phi_cm_emoji_probe.jsonl`, `results/probes/phi__hi-te__askbin.jsonl`, and
+`_summary.txt` alongside the first two; `configs/data.yaml`
+`machine_corpus.drop_buckets_by_generator` no longer lists `phi` (dropped as
+a generator entirely — next entry).
+
+---
+
+## 2026-09-28 (later) — phi dropped entirely; llama is the sole held-out generator
+
+Three of phi's four buckets failed, each for a different structural reason,
+all measured this session:
+
+| bucket | failure | evidence |
+|---|---|---|
+| cm | instruction compliance (emoji), not fixable by prompt wording | paired probe: constraint moved to end + strengthened, 7/12 → 6/12 emoji rows (above) |
+| te | cap-pinning, not fixable by template or ratio | 20.286 tok/word, `num_predict` 3600..3600 on all 12 probe rows — same signature as mistral/te (2026-09-24) |
+| hi | 1.47× over-production even with the compliance ratio clamped to 1.0 (the ratio can only inflate) | `results/probes/phi__hi-te__askbin.jsonl`: machine/ask 1.60, machine/human 1.47, 1/12 at cap |
+
+hi is the one bucket that did not fail on a structural, unfixable-by-config
+axis — but fixing it needs template work (the same kind of change cm's
+2026-09-21 template redesign took a full sitting to land), for a generator
+that would then cover exactly one bucket out of four. Rather than spend that
+sitting, **phi is dropped as a generator entirely**: removed from
+`machine_corpus.generators` and from `heldout_generators` in
+`configs/data.yaml`. Its `drop_buckets_by_generator` entries for cm and te are
+removed as moot (a dropped generator needs no per-bucket exclusion list).
+
+**llama covers all three held-out buckets on its own raw-compliance probe**
+(`results/probes/llama__hi-te-cm__askbin.jsonl`, 12 passages/bucket, current
+templates, ask = bin, no compensation):
+
+| bucket | machine/ask | machine/human | at cap | verdict |
+|---|---|---|---|---|
+| hi | 0.61 (mean 0.62, p10 0.44, p90 0.81) | 0.63 | 0/12 | healthy under-production, ordinary ratio correction |
+| te | 0.52 (mean 0.66, p10 0.26, p90 1.09) | 0.51 | 1/12 (8 %) | healthy under-production; 1 row's ratio is a lower bound |
+| cm | 1.17 (mean 1.51, p10 0.51, p90 2.89) | 1.09 | — | already close to human with no compensation |
+
+No cap-pinning, no compliance-ratio ceiling, nothing that looks like phi's
+failures on any of the three. `compliance_ratio_by_generator.llama` set to
+`{hi: 0.61, te: 0.52, cm: 1.17}`. This is a raw 12-row probe, not the 24-row
+gate — hi/te/cm still each have to clear their own gate (length band +
+codemix + emoji, for cm) once the bulk run reaches the probe threshold.
+
+| Decision | Value | Why |
+|---|---|---|
+| phi | **Dropped as a generator** | Not a per-bucket exclusion — 3 of 4 buckets failed structurally, and fixing the 4th (hi) buys one bucket's worth of held-out coverage for a full sitting of template work. |
+| Held-out generator set | `[llama]`, down from `[llama, phi]` | The only generator left standing on held-out evaluation. |
+| llama compliance ratios | `{hi: 0.61, te: 0.52, cm: 1.17}` | Measured 2026-09-28, raw probe, current templates — see table above. |
+
+### What a single held-out generator costs T3
+
+Non-negotiable #4 requires held-out-generator evaluation; the original design
+locked **2** held-out generators specifically so T3 could claim generalisation
+to a *family* of unseen models, not one specific model's quirks (decisions.md
+2026-09-13). With phi dropped, **T3 now measures generalisation to exactly one
+unseen generator (llama3.1:8b)**. A detector that generalises to llama but
+happens to exploit some llama-specific artifact would pass T3 with this
+design in a way it would not if a second, architecturally different held-out
+model were also available to disagree with it. This is a real reduction in
+what T3's result can claim, not a bookkeeping change — **goes in Limitations**
+alongside the te/mistral note:
+
+> Held-out generalisation (T3) is evaluated against a single unseen generator,
+> llama3.1:8b. A second held-out generator (phi3.5:3.8b-mini-instruct) was
+> attempted and dropped after failing three of its four buckets for
+> structurally distinct reasons (§ below); the result is a narrower
+> generalisation claim than the original two-generator design intended.
+
+### phi's failures as evidence for the generator-bucket-fit finding
+
+The 2026-09-28 (earlier) entry above named the finding: generator-bucket fit
+is a property of the *pair*, not the language. phi's three failures are
+themselves a second, independent demonstration of exactly that claim, this
+time all inside one generator rather than across two: cm failed on
+instruction compliance, te failed on tokenizer-fertility cap-pinning, and hi
+failed on plain over-production — three different mechanisms, same model,
+different buckets. No single "phi is bad at Indic" or "phi is bad at
+constrained generation" story covers all three; each had to be probed and
+diagnosed on its own terms, same as mistral/te and phi/cm were.
+
+**Verify:** `results/probes/llama__hi-te-cm__askbin.jsonl` and its printed
+report; `configs/data.yaml` — `machine_corpus.generators` has no `phi` key,
+`heldout_generators: [llama]`, `compliance_ratio_by_generator.llama` set.
+
+---
+
 ## Decisions still open (fill as resolved)
 
 - [ ] Phase 0.1 — what "patent" means (disclosure / IPR-cell / IPO provisional).
