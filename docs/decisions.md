@@ -1760,6 +1760,45 @@ seen-generator side has shrunk to two of four.
 
 ---
 
+## 2026-09-29 (later) — Part 13 re-run: corpus v2 frozen on all generators; v1 archived
+
+Generation finished (qwen all four buckets, gemma all four, mistral en+hi, llama hi).
+Part 13 was re-run end to end over every generator's rows, same rules as v1 (1,000 human
+cal per bucket, cm cal from calibration-eligible sources only, 5 length bins, trim side
+per bucket, pairs never split, held-out test-only, seed 20260924).
+
+| Decision | Value | Why |
+|---|---|---|
+| **v1 is archived, not overwritten** | `data/processed/archive/v1/{splits.json,corpus.jsonl}`, sha256 re-checked after the move against the 2026-09-24 card | Review-2's numbers (`results/scores.parquet`, fitted heads) were computed on v1 and reproduce only against it. |
+| v2 supersedes v1 at the same paths | `data/processed/splits.json`, `corpus.jsonl`; `corpus.version: v2` | Non-negotiable #6 is honoured per version: the overwrite guard is untouched and v2 was written once. This is the "v2 file keyed on the same groups" the 2026-09-24 entry left open, except the groups were **re-drawn, not reused**, because Part 13 was re-run end to end as instructed (calibration draw, length-match trim and stratified halves all depend on which rows are in the pool). I did not test a variant that pins v1's qwen assignments. v1 ids move between splits. |
+| Held-out prompts are forced to `test` | `assign_splits` / `_halve(forced_test)` | The old code would have put a llama prompt's human and seen-generator rows in `train` while llama's row went to `test`, splitting the pair. 479 llama prompts now sit wholly in test; 0 prompts straddle train/test. |
+| Halves are stratified by seen generator | stratum = {seen generator or none} x {cal} x {trimmed} | Was {has a seen row} x ..., which halved seen machine only in aggregate (hi gemma was 135/114). Each seen generator is now within one row of 50/50. |
+| `--allow-small-buckets` | te machine 449, cm machine 464 | Below `min_rows_per_side` 500; human sides are all above. Recorded, not fixed. |
+
+**Not yet done, needed before any v2 number exists.** `results/scores.parquet` and the
+fitted heads are v1. They must be re-scored on v2 (headA, headB, headB_word,
+fastdetectgpt_en, ppl, binoculars, headC) and T1/T2/T5/T6 re-run. Anything that reads
+`data/processed/splits.json` now sees v2 while the cached scores are still v1.
+`scripts/t3_preliminary_llama_hi.py` was written against the v1 corpus and its
+llama rows were then outside the frozen file; llama hi is now inside it.
+
+**Findings carried to the paper.** (1) Length matching is against the pooled machine
+distribution, so per generator it is off: en test median words human 200, mistral 247,
+gemma 163.5. (2) Stray-script drops are large in two Indic cells, mistral hi 31.6 % and
+gemma te 39.5 %; the surviving rows are the ones the generator wrote cleanly.
+(3) cm machine is 464 rows after trimming 968 long machine rows to human's ~20-word
+distribution; cm has no held-out generator, te neither. T3 is hi only.
+
+**Unrelated, pre-existing.** 8 tests in `tests/data` fail identically before and after
+this change (stale registry assertions such as "two held-out generators", plus
+`NotImplementedError` stubs in test_loaders / test_schema).
+
+**Verify:** `sha256sum data/processed/splits.json data/processed/corpus.jsonl
+data/processed/archive/v1/*` against `docs/data/corpus_card.md` §0; `pytest
+tests/data/test_freeze_splits.py` (5 passed).
+
+---
+
 ## Decisions still open (fill as resolved)
 
 - [ ] Phase 0.1 — what "patent" means (disclosure / IPR-cell / IPO provisional).

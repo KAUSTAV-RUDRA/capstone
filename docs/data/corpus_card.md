@@ -1,12 +1,14 @@
 # Corpus card — IndicStudentMGT
 
-**Corpus v1 is frozen (2026-09-24): human + qwen7b.** §0 describes the frozen
-corpus (`data/processed/corpus.jsonl`, `data/processed/splits.json`); §1–§7 describe
-the human source text it was built from (`data/raw/human/`).
+**Corpus v2 is frozen (2026-09-29): human + qwen7b, gemma, mistral (seen) + llama (held-out).**
+§0 describes the frozen corpus (`data/processed/corpus.jsonl`,
+`data/processed/splits.json`); §1–§7 describe the human source text it was built
+from (`data/raw/human/`). v1 (qwen7b only, the Review-2 corpus) is archived, not
+deleted: see the hash table.
 
 ---
 
-## 0. Frozen corpus v1 (qwen7b)
+## 0. Frozen corpus v2
 
 Built once by
 
@@ -14,13 +16,23 @@ Built once by
 python -m src.data.freeze_splits --config configs/data.yaml --allow-small-buckets
 ```
 
-and frozen (non-negotiable #6; the script refuses to run again). `data/` is
-gitignored, so the committed evidence is the hashes:
+after v1 was moved to `data/processed/archive/v1/` (non-negotiable #6: each version is
+written once and the script refuses to overwrite it). `data/` is gitignored, so the
+committed evidence is the hashes:
 
 | file | rows | sha256 |
 |---|---|---|
-| `data/processed/splits.json` | 8,896 ids | `1a71fa2f0ddcd404c10cb8514680fb8e98240a985e2001a1766e78d502f17471` |
-| `data/processed/corpus.jsonl` | 8,896 | `9b0f10e988debbff78dbec39eac268aa9124b49a2ceeb1f2bca0eed9ceb657a0` |
+| **v2** `data/processed/splits.json` | 12,148 ids | `b550d42a89f1a189a761e4e68c65a7f40822afe604d9bc0838f5becfc04bee1a` |
+| **v2** `data/processed/corpus.jsonl` | 12,148 | `2cee2f8dd40cb07c6295ef8867c68d5858f7db62cca2ef54fd63191c75a4099b` |
+| v1 (archived) `data/processed/archive/v1/splits.json` | 8,896 ids | `1a71fa2f0ddcd404c10cb8514680fb8e98240a985e2001a1766e78d502f17471` |
+| v1 (archived) `data/processed/archive/v1/corpus.jsonl` | 8,896 | `9b0f10e988debbff78dbec39eac268aa9124b49a2ceeb1f2bca0eed9ceb657a0` |
+
+The v1 hashes are unchanged from the 2026-09-24 card; they were re-checked after the
+move. Every Review-2 number (`results/scores.parquet`, fitted heads) was computed on v1
+and reproduces only against the archived files. **v2 is a different split, not an
+extension of v1:** the calibration draw, prompt groups and length matching were re-run
+over all generators, so ids move between splits and v1/v2 numbers are not comparable
+row for row.
 
 Rows carry the 11 schema fields (`id | text | label | language | code_mix_ratio |
 generator | domain | length_tokens | attack_type | writer_L1_band | split`) then
@@ -28,10 +40,10 @@ generator | domain | length_tokens | attack_type | writer_L1_band | split`) then
 is counted with the Head B scorer's tokenizer (ai-forever/mGPT); `code_mix_ratio` is
 recomputed from the cleaned text for both classes.
 
-**Generators.** v1 contains one seen generator, qwen7b (qwen2.5:7b-instruct Q4_K_M).
-gemma and mistral join after Review-2; their rows take the train/test group already
-recorded for their prompt in `splits.json` (`prompt_groups`), so the frozen file does
-not change. No held-out generator exists yet, so T3 is not computable on v1.
+**Generators.** Seen: qwen7b (en, hi, te, cm), gemma (en, hi, te, cm), mistral (en, hi).
+Held-out, test only: llama (hi). mistral does not generate te or cm, phi is dropped,
+and llama does not generate cm or te (decisions.md 2026-09-24 to 2026-09-29). **T3 is
+computable on hi only**; te and cm have no held-out generator.
 
 ### Pipeline
 
@@ -46,9 +58,11 @@ not change. No held-out generator exists yet, so T3 is not computable on v1.
    en/hi/te trim **human** to the machine distribution (human is the surplus); cm trims
    **machine** to the human distribution.
 4. **Split** by prompt group: a human passage and its machine continuation always
-   share a split; human and machine train/test are exact halves.
+   share a split, and every seen generator is halved train/test within one row. A prompt
+   that has a llama row is forced to `test`, together with its human passage and any
+   seen-generator row, so no pair straddles train and test (0 prompts do).
 
-### Cleaning — % dropped per bucket × source
+### Cleaning — % dropped per bucket × source (v2)
 
 | bucket | source | rows | dropped | % | emoji | echo | truncated | stray script |
 |---|---|---|---|---|---|---|---|---|
@@ -56,59 +70,75 @@ not change. No held-out generator exists yet, so T3 is not computable on v1.
 | en | samanantar_en | 1100 | 0 | 0.0 | 0 | 0 | – | 0 |
 | en | wikipedia | 495 | 4 | 0.8 | 2 | 0 | – | 2 |
 | en | **qwen7b** | 730 | 10 | 1.4 | 0 | 3 | 0 | 7 |
+| en | **gemma** | 712 | 8 | 1.1 | 7 | 1 | 0 | 0 |
+| en | **mistral** | 758 | 1 | 0.1 | 0 | 0 | 1 | 0 |
 | hi | indiccorp_v2 | 1650 | 3 | 0.2 | 2 | 0 | – | 1 |
 | hi | wikipedia | 550 | 30 | 5.5 | 0 | 0 | – | 30 |
 | hi | **qwen7b** | 500 | 34 | 6.8 | 1 | 1 | 15 | 18 |
+| hi | **gemma** | 250 | 1 | 0.4 | 0 | 0 | 0 | 1 |
+| hi | **mistral** | 250 | 79 | 31.6 | 0 | 1 | 7 | 75 |
+| hi | **llama** | 500 | 21 | 4.2 | 0 | 0 | 11 | 10 |
 | te | indiccorp_v2 | 1650 | 4 | 0.2 | 2 | 0 | – | 2 |
 | te | wikipedia | 550 | 39 | 7.1 | 0 | 0 | – | 39 |
 | te | **qwen7b** | 400 | 72 | 18.0 | 0 | 2 | 3 | 69 |
+| te | **gemma** | 200 | 79 | 39.5 | 2 | 1 | 0 | 78 |
 | cm | cmu_hinglish_dog | 917 | 4 | 0.4 | 0 | 3 | – | 1 |
 | cm | comi_lingua | 1175 | 4 | 0.3 | 0 | 0 | – | 4 |
 | cm | hinge | 108 | 0 | 0.0 | 0 | 0 | – | 0 |
 | cm | **qwen7b** | 701 | 52 | 7.4 | 3 | 25 | 13 | 15 |
+| cm | **gemma** | 790 | 7 | 0.9 | 4 | 1 | 0 | 3 |
 
-A row can fail more than one rule. Stripping changed 46 en, 31 cm, 1 hi qwen7b rows
-and 3 hc3 / 1–2 Indic human rows. qwen7b te's stray-script drops are mostly Devanagari
-inside Telugu (43 rows). Indic Wikipedia's are names in other Indian scripts; symmetric
+A row can fail more than one rule. 455 rows dropped in all, copied to
+`data/raw/discarded/part13_clean_v2.jsonl`. The two large machine drop rates are both
+stray script in an Indic bucket: **mistral hi 31.6 %** (75 of 250) and **gemma te
+39.5 %** (78 of 200), on top of qwen7b te's 18.0 % (mostly Devanagari inside Telugu).
+The surviving rows are what the model wrote in the right script, so the bucket's machine
+text is biased towards passages the generator handled cleanly; report it with those
+rates. Indic Wikipedia's human drops are names in other Indian scripts; symmetric
 application costs those sources 5–7 % but stays under the 2 %-per-bucket human guard.
-Dropped rows: `data/raw/discarded/part13_clean_v1.jsonl`.
 
-### Final counts — bucket × source × split
+### Final counts — bucket × generator × split
 
-| bucket | source | cal | train | test | total |
+| bucket | generator | cal | train | test | total |
 |---|---|---|---|---|---|
-| en | hc3 | 275 | 85 | 84 | 444 |
-| en | samanantar_en | 502 | 120 | 134 | 756 |
-| en | wikipedia | 223 | 66 | 54 | 343 |
+| en | human | 1000 | 403 | 402 | 1805 |
 | en | qwen7b | – | 359 | 361 | 720 |
-| **en** | **human / machine** | **1000 / –** | **271 / 359** | **272 / 361** | **1543 / 720** |
-| hi | indiccorp_v2 | 760 | 281 | 284 | 1325 |
-| hi | wikipedia | 240 | 111 | 108 | 459 |
+| en | gemma | – | 352 | 352 | 704 |
+| en | mistral | – | 379 | 378 | 757 |
+| hi | human | 1000 | 452 | 449 | 1901 |
 | hi | qwen7b | – | 233 | 233 | 466 |
-| **hi** | **human / machine** | **1000 / –** | **392 / 233** | **392 / 233** | **1784 / 466** |
-| te | indiccorp_v2 | 762 | 274 | 272 | 1308 |
-| te | wikipedia | 238 | 75 | 77 | 390 |
-| te | qwen7b | – | 163 | 165 | 328 |
-| **te** | **human / machine** | **1000 / –** | **349 / 163** | **349 / 165** | **1698 / 328** |
-| cm | cmu_hinglish_dog | 894 | 9 | 10 | 913 |
-| cm | comi_lingua | 0 | 586 | 585 | 1171 |
-| cm | hinge | 106 | 1 | 1 | 108 |
-| cm | qwen7b | – | 82 | 83 | 165 |
-| **cm** | **human / machine** | **1000 / –** | **596 / 82** | **596 / 83** | **2192 / 165** |
+| hi | gemma | – | 124 | 125 | 249 |
+| hi | mistral | – | 85 | 86 | 171 |
+| hi | llama (held-out) | – | 0 | 479 | 479 |
+| te | human | 1000 | 394 | 397 | 1791 |
+| te | qwen7b | – | 164 | 164 | 328 |
+| te | gemma | – | 60 | 61 | 121 |
+| cm | human | 1000 | 595 | 597 | 2192 |
+| cm | qwen7b | – | 97 | 98 | 195 |
+| cm | gemma | – | 135 | 134 | 269 |
 
-**Total 8,896 rows** (7,217 human, 1,679 machine). hi, te and cm have fewer than 500
-machine rows; accepted for v1 and recorded (decisions.md 2026-09-24). Length matching
-excluded 1,976 rows (1,492 human in en/hi/te, 484 machine in cm); their ids and prompt
-groups are in `splits.json` under `excluded.length_match`.
+**Total 12,148 rows** (7,689 human, 4,459 machine). Machine per bucket: en 2,181,
+hi 1,365, te 449, cm 464. te and cm are below the 500-row floor; frozen under
+`--allow-small-buckets` (decisions.md 2026-09-29). Length matching excluded 1,988 rows
+(1,020 human in en/hi/te, 968 machine in cm); their ids and prompt groups are in
+`splits.json` under `excluded.length_match`. Calibration: 1,000 human per bucket, and cm
+cal is cmu_hinglish_dog (894) + HinGE (106) only.
 
 ### Length after matching (median words / mGPT tokens)
 
 | bucket | cal human | test human | test machine |
 |---|---|---|---|
-| en | 208 / 283 | 194.5 / 265.5 | 193 / 262 |
-| hi | 159 / 560.5 | 175 / 618.5 | 172 / 646 |
-| te | 155 / 983.5 | 155 / 985 | 156 / 992 |
-| cm | 85 / 145.5 | 20 / 35 | 20 / 36 |
+| en | 208 / 283 | 200 / 273 | 206 / 290 |
+| hi | 158 / 563 | 171 / 599 | 169 / 604 |
+| te | 154 / 979.5 | 151 / 953 | 151 / 956 |
+| cm | 85 / 146 | 20 / 35 | 20 / 35 |
+
+Matching is against the **pooled** machine distribution of a bucket, not per generator,
+so a generator can sit off the human median even though the pool matches. Test median
+words, human vs machine: **en** human 200 against qwen7b 181, gemma 163.5, **mistral
+247**; hi 171 against qwen7b 168, gemma 164, mistral 164.5, llama 173; te 151 against
+qwen7b 157, gemma 133; cm 20 against qwen7b 20, gemma 19. en/mistral is 1.24× human and
+en/gemma 0.82×, so any per-generator T3/T4 row for en carries a length caveat.
 
 ### cm: the bound is calibrated on chat-register Hinglish
 

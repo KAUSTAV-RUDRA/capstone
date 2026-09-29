@@ -2,7 +2,9 @@
 
 buckets: [en, hi, te, cm]
 
-# Frozen split (non-negotiable #6): written once, never regenerated.
+# Frozen split (non-negotiable #6): written once, never regenerated in place.
+# v1 (qwen7b only, Review-2) is archived under data/processed/archive/v1/ with its hashes
+# in docs/data/corpus_card.md; v2 (all generators) superseded it on 2026-09-29.
 splits_file: data/processed/splits.json
 
 # --- Frozen corpus (src/data/freeze_splits.py; parts-plan Part 13, review2-sprint Day 1) ---
@@ -12,9 +14,9 @@ splits_file: data/processed/splits.json
 # calibration-eligible sources) -> every remaining row by its prompt group,
 # train_share to train and the rest to test. Held-out generators: test only.
 corpus:
-  version: v1
+  version: v2
   path: data/processed/corpus.jsonl
-  generators: [qwen7b]              # v1 is qwen7b only; gemma/mistral join after Review-2
+  generators: [qwen7b, gemma, mistral, llama]   # v1 was qwen7b only (archived, data/processed/archive/v1); v2 adds gemma, mistral, llama (held-out)
   seed: 20260924
   length_bins: 5                    # quantile bins of the bucket's train/test human word counts
   # Which side length-matching trims (decisions.md 2026-09-24, Part 13). The

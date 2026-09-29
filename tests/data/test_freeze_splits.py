@@ -52,6 +52,22 @@ def test_cal_only_from_eligible_sources_and_heldout_to_test() -> None:
             assert split[m["id"]] == group[m["prompt_id"]]
 
 
+def test_heldout_prompt_group_is_test_so_no_pair_straddles_train_test() -> None:
+    rows = _rows()
+    human = [r for r in rows if r["label"] == 0]
+    machine = [r for r in rows if r["label"] == 1]
+    machine += [{"id": f"x{i}", "label": 1, "language": "cm", "length_words": 10 + i,
+                 "generator": "llama", "prompt_id": f"h{i}"} for i in (2, 4, 6, 8)]
+    for seed in range(20):
+        split, group = assign_splits(human, machine, config=_config(), rng=random.Random(seed))
+        for m in machine:
+            if m["generator"] == "llama":
+                assert group[m["prompt_id"]] == "test"
+                assert split[m["prompt_id"]] in ("test", "cal")        # human twin
+        seen = [split[m["id"]] for m in machine if m["generator"] == "qwen7b"]
+        assert all(s in ("train", "test") for s in seen)
+
+
 def test_cal_floor_fails_loudly() -> None:
     rows = _rows()
     with pytest.raises(ValueError, match="calibration-eligible"):

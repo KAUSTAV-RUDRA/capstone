@@ -27,10 +27,13 @@ The pipeline, per bucket (``corpus`` in ``configs/data.yaml``)
 4. **Split** the rest:
 
    - Every prompt (= human passage id) gets a **prompt group** split, train or
-     test, balanced ``train_share`` within four strata: {has a machine row, does
-     not} x {human in cal, not}. That makes human train/test and machine
-     train/test both exact halves, and keeps a human passage and its machine
-     continuation in the same split (decisions.md 2026-09-13 §3 carry-over).
+     test, balanced ``train_share`` within strata of {seen generator of the
+     prompt, or none} x {human in cal, not} x {human trimmed, not}. That makes
+     every seen generator's train/test an exact half, and keeps a human passage
+     and its machine continuation in the same split (decisions.md 2026-09-13 §3
+     carry-over).
+   - A prompt with a held-out generator's row is forced to ``test`` and counts
+     towards that stratum's test half, so no pair straddles train and test.
    - Non-cal human rows and seen-generator rows take their prompt group's split;
      held-out generators go to ``test`` (non-negotiable #4).
 
@@ -156,11 +159,16 @@ def _stratified_pick(rows: list[dict[str, Any]], k: int, key, rng: random.Random
     return picked
 
 
-def _halve(ids: list[str], train_share: float, rng: random.Random) -> dict[str, str]:
-    ordered = sorted(ids)
-    rng.shuffle(ordered)
-    n_train = round(len(ordered) * train_share)
-    return {pid: ("train" if i < n_train else "test") for i, pid in enumerate(ordered)}
+def _halve(ids: list[str], train_share: float, rng: random.Random,
+           forced_test: set[str] | frozenset[str] = frozenset()) -> dict[str, str]:
+    """Split ``ids`` train/test. ``forced_test`` ids go to test first and count towards
+    the test half, so the stratum's train share stays exact while it has room."""
+    n_train = min(round(len(ids) * train_share), len(ids) - len(forced_test & set(ids)))
+    free = sorted(set(ids) - forced_test)
+    rng.shuffle(free)
+    out = {pid: ("train" if i < n_train else "test") for i, pid in enumerate(free)}
+    out.update({pid: "test" for pid in ids if pid in forced_test})
+    return out
 
 
 def pick_cal(human: list[dict[str, Any]], config: dict[str, Any], rng: random.Random) -> set[str]:
@@ -207,15 +215,21 @@ def assign_splits(human: list[dict[str, Any]], machine: list[dict[str, Any]], *,
     if cal_ids is None:
         cal_ids = pick_cal(human, config, rng)
 
-    seen_prompts = {m["prompt_id"] for m in machine if m["generator"] not in heldout}
+    # Each prompt has at most one seen generator, so stratifying on it halves every
+    # seen generator separately, not just the seen rows in aggregate.
+    seen_gen = {m["prompt_id"]: m["generator"] for m in machine if m["generator"] not in heldout}
+    # A held-out row is test-only (non-negotiable #4), so its whole prompt group is
+    # test: otherwise the human passage and its seen-generator rows could sit in
+    # train while the held-out continuation of the same prompt sits in test.
+    heldout_prompts = {m["prompt_id"] for m in machine if m["generator"] in heldout}
     all_prompts = {h["id"] for h in human} | {m["prompt_id"] for m in machine} | set(extra_prompts)
     group: dict[str, str] = {}
-    for has_machine in (True, False):
+    for gen in sorted({*seen_gen.values(), None}, key=str):
         for in_cal in (True, False):
             for extra in (True, False):
-                stratum = [p for p in all_prompts if (p in seen_prompts) == has_machine
+                stratum = [p for p in all_prompts if seen_gen.get(p) == gen
                            and (p in cal_ids) == in_cal and (p in extra_prompts) == extra]
-                group.update(_halve(stratum, train_share, rng))
+                group.update(_halve(stratum, train_share, rng, heldout_prompts))
 
     split = {h["id"]: ("cal" if h["id"] in cal_ids else group[h["id"]]) for h in human}
     for m in machine:
