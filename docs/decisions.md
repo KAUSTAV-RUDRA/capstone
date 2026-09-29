@@ -1743,6 +1743,23 @@ gate-failure output from `python -m src.data.generate --generator llama
 
 ---
 
+## 2026-09-29 — mistral/cm dropped: fourth generator, same short-passage signature
+
+mistral's cm gate failed at median machine/human **3.43x**, 62 % of its 24
+probe rows cap-pinned — the same signature as phi/cm (2026-09-28) and llama's
+high-variance cm failure (2026-09-28). Its 24 rows are moved to
+`data/raw/discarded/mistral__cm__gate-failed-2026-09-29.jsonl` and
+`drop_buckets_by_generator.mistral` now reads `[te, cm]`.
+
+**Four generators tested on cm short passages, three failed on length
+variance.** Human cm median is ~20 words, and prompt-controlled length
+matching is unreliable at that scale: qwen and gemma are the only two that
+hold. cm coverage is now **qwen + gemma only, with no held-out generator** —
+consistent with te's held-out gap (2026-09-28, above), but for cm even the
+seen-generator side has shrunk to two of four.
+
+---
+
 ## Decisions still open (fill as resolved)
 
 - [ ] Phase 0.1 — what "patent" means (disclosure / IPR-cell / IPO provisional).

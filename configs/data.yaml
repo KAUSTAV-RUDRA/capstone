@@ -358,7 +358,7 @@ machine_corpus:
   # abandoned) and te has no held-out generator at all — both go in
   # Limitations.
   drop_buckets_by_generator:
-    mistral: [te]
+    mistral: [te, cm]
     llama: [cm, te]
   selection_dir: data/processed/selection
   # `ollama` tags resolve to Q4_K_M where such a tag exists (checked against
