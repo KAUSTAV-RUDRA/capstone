@@ -1950,6 +1950,23 @@ detectgpt/xlmr/explain/loaders etc. and stale generator-count assertions), uncha
 
 ---
 
+## 2026-09-30 — Per-bucket Head B weight: null for RQ2; coverage targets: recall at tau is the limit
+
+**exp11.** Global, interaction and separate-per-bucket fusers over [headA, headB]; also refit with
+out-of-fold Head A (the adopted fuser sees in-sample Head A on train). Per-bucket weights let Head B take
+its own sign (en +1.96, te -0.48, hi ~0, cm +0.44) and remove the global fuser's te loss (-0.009 -> +0.003),
+but fused minus Head A alone is <= +0.003 in every bucket, CI spanning 0 except held-out llama hi
+(+0.003, CI [+0.001, +0.005]). OOF Head A changes nothing. RQ2 has a null answer on this corpus: Head B adds
+nothing measurable beyond Head A. Adopted fuser not changed. Paraphrase robustness (T4) still untested.
+
+**exp12.** With tau fixed, FPR (~1%) and machine recall (en 0.80, hi 0.39, te 0.16, cm 0.32) do not move with
+the HUMAN cutoff; raising it only turns ABSTAIN into false clears of machine text. 70/80/90% coverage costs
+false clears of en 0.2/0.5/7.5%, hi 18/32/47%, te 9/30/57%, cm 10/22/44%. Shipped cutoff stays. Fix for
+deployability is a higher-recall score or alpha 0.05, not a lower HUMAN cutoff. Details:
+docs/results/followup_exp11_exp12.md.
+
+---
+
 ## Decisions still open (fill as resolved)
 
 - [ ] Phase 0.1 — what "patent" means (disclosure / IPR-cell / IPO provisional).
