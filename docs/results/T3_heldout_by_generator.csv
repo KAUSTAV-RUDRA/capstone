@@ -1,0 +1,33 @@
+bucket,method,generator,role,n_machine,auroc
+hi,ppl,gemma,seen,125,0.8403563474387528
+hi,ppl,llama,heldout,479,0.8868327203574633
+hi,ppl,mistral,seen,86,0.6579996892318848
+hi,ppl,qwen7b,seen,233,0.8038846458988501
+hi,binoculars,gemma,seen,125,0.8708062360801782
+hi,binoculars,llama,heldout,479,0.9170134513718726
+hi,binoculars,mistral,seen,86,0.6371523281711297
+hi,binoculars,qwen7b,seen,233,0.7371842052438896
+hi,fastdetectgpt_en,gemma,seen,125,0.8837772828507795
+hi,fastdetectgpt_en,llama,heldout,479,0.9265033407572383
+hi,fastdetectgpt_en,mistral,seen,86,0.6266380069404879
+hi,fastdetectgpt_en,qwen7b,seen,233,0.7275108252004933
+hi,headA,gemma,seen,125,0.9555634743875279
+hi,headA,llama,heldout,479,0.9468919566096777
+hi,headA,mistral,seen,86,0.9706324131144144
+hi,headA,qwen7b,seen,233,0.9840848045728706
+hi,headB,gemma,seen,125,0.813719376391982
+hi,headB,llama,heldout,479,0.7853313556918413
+hi,headB,mistral,seen,86,0.11866162531724245
+hi,headB,qwen7b,seen,233,0.15907548486383666
+hi,headB_word,gemma,seen,125,0.8102449888641425
+hi,headB_word,llama,heldout,479,0.780681728359472
+hi,headB_word,mistral,seen,86,0.14336769047495726
+hi,headB_word,qwen7b,seen,233,0.17702667826452678
+hi,headC (diagnostic),gemma,seen,125,0.9938886414253898
+hi,headC (diagnostic),llama,heldout,479,0.9608919845074417
+hi,headC (diagnostic),mistral,seen,86,0.9958564251307815
+hi,headC (diagnostic),qwen7b,seen,233,0.9984897292027108
+hi,fused (A+B),gemma,seen,125,0.9584320712694877
+hi,fused (A+B),llama,heldout,479,0.9534711792849803
+hi,fused (A+B),mistral,seen,86,0.9681203708499507
+hi,fused (A+B),qwen7b,seen,233,0.9745356873165929

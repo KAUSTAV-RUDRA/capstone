@@ -9,7 +9,7 @@ inference needs: per-bucket temperature, conformal thresholds (alpha 0.01 for
 the MACHINE cutoff, plus 0.05 for reference) and the calibration-split human
 median (the HUMAN cutoff). Head C is excluded (docs/results/headc_diagnosis.md).
 
-Usage: python -m scripts.export_calibration --config configs/default.yaml
+Usage: python -m scripts.export_calibration --config configs/models_norm.yaml
 Writes: results/calibration.json
 """
 from __future__ import annotations
@@ -18,7 +18,7 @@ import argparse
 import json
 from pathlib import Path
 
-MODEL_VERSION = "v1.0-qwen7b"
+MODEL_VERSION = "v2.0-norm"
 OUT_PATH = "results/calibration.json"
 
 
@@ -34,9 +34,10 @@ def run(config_path: str) -> dict:
         "heads_used": ["headA", "headB"],
         "head_c_excluded": True,
         "head_c_exclusion_reason": (
-            "1.000 AUROC on en/hi/te is a lexical fingerprint of the single seen "
-            "generator scored so far, not a generalisable signal "
-            "(docs/results/headc_diagnosis.md, non-negotiable #4)."
+            "Its near-perfect AUROC (0.961 on held-out llama hi) is matched by a plain "
+            "TF-IDF classifier (0.911-0.921), so it cannot be told apart from a "
+            "human-scraped-vs-prompted-generation provenance difference "
+            "(docs/decisions.md 2026-09-30; reported as a diagnostic only)."
         ),
         "buckets": {},
     }
@@ -55,7 +56,7 @@ def run(config_path: str) -> dict:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", default="configs/default.yaml")
+    parser.add_argument("--config", default="configs/models_norm.yaml")
     args = parser.parse_args()
     payload = run(args.config)
     print(json.dumps(payload, indent=2))

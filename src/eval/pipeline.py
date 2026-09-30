@@ -30,6 +30,7 @@ from src.calibration.conformal import ConformalCalibrator
 from src.calibration.temperature import TemperatureScaler
 from src.data.schema import LANGUAGE_BUCKETS
 from src.fusion.fuser import Fuser
+from src.utils.config import load_config
 from src.utils.io import read_jsonl
 
 CORPUS_PATH = "data/processed/corpus.jsonl"
@@ -70,21 +71,43 @@ def _needs_fit(scores: pd.DataFrame) -> bool:
     return not required.issubset(scores.columns) or scores[list(required)].isna().any().any()
 
 
-def fit_full_pipeline(config_path: str = "configs/default.yaml", force: bool = False) -> PipelineArtifacts:
+def fit_full_pipeline(config_path: str = "configs/models_norm.yaml", force: bool = False) -> PipelineArtifacts:
     """Fit (or load cached) fusion + temperature + conformal + abstention.
 
-    Idempotent: if ``results/scores.parquet`` already has the fused columns
+    Idempotent: if the config's scores table already has the fused columns
     and ``results/conformal_thresholds.csv`` exists, everything is loaded from
     disk instead of refit, unless ``force=True``.
+
+    The default config is the canonical normalised one: a fit writes the shared
+    ``results/models/fuser_ab.joblib``, ``temperature.csv`` and ``conformal_thresholds.csv``
+    that the webapp loads, so a caller (a test, say) that fits on raw-text scores would
+    overwrite them. Pass ``configs/default.yaml`` deliberately, never by default.
     """
     corpus = read_jsonl(CORPUS_PATH)
-    scores = pd.read_parquet(SCORES_PATH).set_index("id")
+    scores_path = scores_path_for(config_path)
+    scores = pd.read_parquet(scores_path).set_index("id")
 
     if force or _needs_fit(scores) or not Path(CONFORMAL_CSV).exists():
         artifacts = _fit(corpus, scores)
-        _persist(artifacts)
+        _persist(artifacts, scores_path)
         return artifacts
     return _load(corpus, scores)
+
+
+def scores_path_for(config_path: str) -> str:
+    """The wide scores table this config scores into (``pipeline.scores_path``).
+
+    ``configs/models_norm.yaml`` points at ``results/norm/scores.parquet``; a config
+    without a ``pipeline`` block falls back to the raw-text ``results/scores.parquet``.
+    """
+    return str((load_config(config_path).get("pipeline") or {}).get("scores_path", SCORES_PATH))
+
+
+def generator_roles(data_config: str = "configs/data.yaml") -> tuple[set[str], set[str]]:
+    """``(seen, heldout)`` generator names, read from the data config's roles."""
+    gens = load_config(data_config)["machine_corpus"]["generators"]
+    return ({g for g, v in gens.items() if v["role"] == "seen"},
+            {g for g, v in gens.items() if v["role"] == "heldout"})
 
 
 def _fit(corpus: list[dict[str, Any]], scores: pd.DataFrame) -> PipelineArtifacts:
@@ -152,9 +175,9 @@ def _fit(corpus: list[dict[str, Any]], scores: pd.DataFrame) -> PipelineArtifact
     )
 
 
-def _persist(a: PipelineArtifacts) -> None:
-    Path(SCORES_PATH).parent.mkdir(parents=True, exist_ok=True)
-    a.scores.reset_index().to_parquet(SCORES_PATH, index=False)
+def _persist(a: PipelineArtifacts, scores_path: str = SCORES_PATH) -> None:
+    Path(scores_path).parent.mkdir(parents=True, exist_ok=True)
+    a.scores.reset_index().to_parquet(scores_path, index=False)
     a.fuser_ab.save(FUSER_AB_PATH)
     a.fuser_abc.save(FUSER_ABC_PATH)
 

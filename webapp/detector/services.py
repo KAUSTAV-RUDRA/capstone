@@ -13,8 +13,8 @@ request.
 Requires, ahead of time (Day 2-4 pipeline outputs, all gitignored under
 ``results/``):
   results/norm/models/headA.joblib     python -m src.eval.score --config configs/models_norm.yaml --column headA
-  results/models/fuser_ab.joblib       python -m experiments.exp04_fusion --config configs/default.yaml
-  results/calibration.json             python -m scripts.export_calibration --config configs/default.yaml
+  results/models/fuser_ab.joblib       python -m experiments.exp04_fusion --config configs/models_norm.yaml
+  results/calibration.json             python -m scripts.export_calibration --config configs/models_norm.yaml
 Missing any of these raises a clear RuntimeError naming the command to run.
 """
 from __future__ import annotations
@@ -89,7 +89,7 @@ def _get_calibration() -> dict[str, Any]:
     if "calibration" not in _cache:
         if not CALIBRATION_PATH.exists():
             raise _missing(CALIBRATION_PATH,
-                          "Run `python -m scripts.export_calibration --config configs/default.yaml`.")
+                          "Run `python -m scripts.export_calibration --config configs/models_norm.yaml`.")
         _cache["calibration"] = json.loads(CALIBRATION_PATH.read_text(encoding="utf-8"))
     return _cache["calibration"]
 
@@ -136,7 +136,7 @@ def _get_fuser() -> Fuser:
     if "fuser" not in _cache:
         if not Path(FUSER_AB_DEFAULT_PATH).exists():
             raise _missing(FUSER_AB_DEFAULT_PATH,
-                          "Run `python -m experiments.exp04_fusion --config configs/default.yaml`.")
+                          "Run `python -m experiments.exp04_fusion --config configs/models_norm.yaml`.")
         _cache["fuser"] = Fuser.load(FUSER_AB_DEFAULT_PATH)
     return _cache["fuser"]
 

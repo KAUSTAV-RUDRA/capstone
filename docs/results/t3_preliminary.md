@@ -1,3 +1,5 @@
+> **Superseded (v1 corpus, raw text).** See [README.md](README.md): T3 for held-out results, the Head C section for the v2 diagnosis.
+
 # T3 preliminary — llama on hi
 
 **Preliminary, not a frozen-corpus result.** `data/processed/splits.json` was NOT touched. llama's 500 hi rows (the only bucket that cleared its 24-row gate — cm and te both failed theirs, decisions.md 2026-09-28) were cleaned with `src.data.clean_artifacts.clean_rows` (Part 13's cleaning rules, unchanged) and length-matched against the EXISTING frozen hi human test split (392 rows) with `src.data.freeze_splits.length_match` — the same mechanism Part 13 used, applied read-only against already-frozen reference data. headA and the fusion/conformal artifacts were LOADED from `results/models/` and `results/conformal_thresholds.csv`, not refit. headB is mGPT inference, which has no fitted state to reuse.

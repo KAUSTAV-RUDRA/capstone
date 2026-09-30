@@ -1914,6 +1914,42 @@ Tables, fusion and calibration are deliberately not rebuilt yet.
 
 ---
 
+## 2026-09-30 — Downstream pipeline rebuilt on v2 normalised; fusion does not beat Head A; tests could clobber artefacts
+
+**Done.** binoculars re-scored on normalised text (all 7 columns now match); merged to
+`results/norm/scores.parquet` (`scripts/merge_norm_scores.py`). Fusion `[headA, headB, bucket
+one-hot]` refit on the v2 train split and saved (`results/models/fuser_ab.joblib`;
+`results/calibration.json`, model_version v2.0-norm; webapp `analyse_text` runs again). Per-bucket
+temperature, per-bucket conformal tau at alpha 0.01/0.05 and a pooled global tau refit. All tables
+rewritten (T1, T2, T3 new, T5 incl. the unmatched-human check now computed, T6, F1, F2, S1 Head A
+ablation) in `results/` and `docs/results/`; `docs/results/README.md` rewritten. Reproduce commands
+are at the top of that README.
+
+**Findings to carry into the paper.**
+- Fusion AUROC en 0.989, hi 0.961, te 0.963, cm 0.928 beats every zero-shot baseline but **not Head A
+  alone** (0.986 / 0.960 / 0.973 / 0.928); te is 0.010 worse. Head B is inverted on seen hi (0.336) and
+  te (0.235), and one global headB weight cannot use it in every bucket. Per-bucket headB sign or
+  interaction terms is a structural option, not done.
+- T3 (llama, hi): fused 0.969 seen -> 0.953 held-out; Head A 0.973 -> 0.947; zero-shot baselines and
+  Head B *rise* on llama (e.g. fastdetectgpt_en 0.752 -> 0.927). Only hi has a held-out generator.
+- Gate at alpha=0.01: human FPR ~1% in every bucket, but coverage 0.37-0.73 and it flags only 31% (seen)
+  / 46% (llama) of hi machine text MACHINE; the rest abstains. Calibration gap is generator shift (hi ECE
+  0.025 seen, 0.076 with llama), not temperature (temperatures 0.81-1.20, ECE barely moves).
+- T5: en L1 disparity is reversed (general 0.085 vs indian 0.016 at alpha 0.05); unmatched humans are not
+  flagged materially more than matched.
+- All AUROCs are "scraped human vs prompted generation" (provenance confound above).
+
+**Bug found and fixed.** `run_ablation()` and `fit_full_pipeline()` defaulted to `configs/default.yaml`,
+which has no scores path, so the test suite (`tests/eval/test_ablation.py`) refit on the raw-text scores and
+overwrote `results/models/fuser_ab.joblib`, `temperature.csv` and `conformal_thresholds.csv` with raw-text
+fits. Defaults now point at `configs/models_norm.yaml`; the suite leaves the artefacts byte-identical. All
+tables were regenerated after the fix. 16 other tests fail on master too (NotImplemented stubs for
+detectgpt/xlmr/explain/loaders etc. and stale generator-count assertions), unchanged by this work.
+
+**Not done.** T4 (adversarial), XLM-R supervised baseline, any held-out generator outside hi.
+
+---
+
 ## Decisions still open (fill as resolved)
 
 - [ ] Phase 0.1 — what "patent" means (disclosure / IPR-cell / IPO provisional).

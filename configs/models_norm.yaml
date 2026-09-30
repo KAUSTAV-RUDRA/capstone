@@ -139,3 +139,12 @@ head_c:
 # results stay intact for side-by-side comparison. Only head_a/head_b/head_c caches are
 # redirected; qwen_baseline/binoculars are NOT re-scored under this config.
 text_normalisation: whitespace
+
+# --- Downstream pipeline (src/eval/pipeline.py; experiments/exp01..exp10) ---
+# scores_path is the merged normalised table: results/norm/scores_a.parquet (headA)
+# joined with results/norm/scores_gpu.parquet (everything else). The pipeline adds
+# the fused_* columns to it. The fuser, temperature, conformal thresholds and the
+# T/F tables go to results/ (the webapp reads results/models/fuser_ab.joblib and
+# results/calibration.json).
+pipeline:
+  scores_path: results/norm/scores.parquet

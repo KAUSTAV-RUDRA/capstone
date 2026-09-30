@@ -41,7 +41,7 @@ def run(config_path: str) -> "pd.DataFrame":
     from src.calibration.abstention import coverage_sweep
     from src.data.schema import LANGUAGE_BUCKETS
     from src.eval.metrics import expected_calibration_error
-    from src.eval.pipeline import fit_full_pipeline
+    from src.eval.pipeline import fit_full_pipeline, generator_roles
     from src.eval.risk_coverage import metrics_at_coverage, risk_coverage_curve
     from src.utils.io import write_csv
 
@@ -51,9 +51,28 @@ def run(config_path: str) -> "pd.DataFrame":
         for b in LANGUAGE_BUCKETS
     }
 
+    _, heldout = generator_roles()
     t6_rows, decision_rows, sweep_rows, curve_rows = [], [], [], []
     for bucket in LANGUAGE_BUCKETS:
         rows = test_by_bucket[bucket]
+        # A bucket with a held-out generator also gets seen-only and held-out-only T6 rows, so a
+        # calibration gap between seen and unseen generators is visible instead of averaged away.
+        if any(r["generator"] in heldout for r in rows if r["label"] == 1):
+            for tag, keep in (("seen only", lambda r: r["label"] == 0 or r["generator"] not in heldout),
+                              ("held-out", lambda r: r["label"] == 0 or r["generator"] in heldout)):
+                sub = [r for r in rows if keep(r)]
+                ids_s = [r["id"] for r in sub]
+                y_s = np.array([r["label"] for r in sub])
+                pb = artifacts.scores.loc[ids_s, "fused_ab"].to_numpy(dtype=float)
+                pa = artifacts.scores.loc[ids_s, "fused_ab_calibrated"].to_numpy(dtype=float)
+                extra = {"bucket": f"{bucket} ({tag})", "temperature": artifacts.temperature.temperature(bucket),
+                         "ece_before": expected_calibration_error(y_s, pb),
+                         "ece_after": expected_calibration_error(y_s, pa)}
+                for cov in (0.5, 0.7, 0.9):
+                    m = metrics_at_coverage(y_s, pa, np.maximum(pa, 1 - pa), cov)
+                    extra[f"accuracy_at_{int(cov*100)}pct"] = m["accuracy"]
+                    extra[f"fpr_at_{int(cov*100)}pct"] = m["fpr"]
+                t6_rows.append(extra)
         ids = [r["id"] for r in rows]
         y = np.array([r["label"] for r in rows])
         prob_before = artifacts.scores.loc[ids, "fused_ab"].to_numpy(dtype=float)

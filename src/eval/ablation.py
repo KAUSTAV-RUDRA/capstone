@@ -24,7 +24,7 @@ ABLATION_CONFIGS: tuple[str, ...] = (
 )
 
 
-def run_ablation(config_path: str = "configs/default.yaml") -> "pd.DataFrame":
+def run_ablation(config_path: str = "configs/models_norm.yaml") -> "pd.DataFrame":
     """Run every ablation configuration and return the T2 table per bucket.
 
     Columns: bucket, config, auroc, f1, fpr, coverage, accuracy. AUROC/F1 are

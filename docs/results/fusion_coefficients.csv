@@ -1,0 +1,14 @@
+fusion,feature,weight_standardised
+A+B (adopted),headA,3.6276757884568136
+A+B (adopted),headB,0.33300278032518865
+A+B (adopted),bucket_en,0.43486189259456715
+A+B (adopted),bucket_hi,0.039671758600497854
+A+B (adopted),bucket_te,0.030502764140689354
+A+B (adopted),bucket_cm,-0.5835461644158533
+"A+B+C (reference, excluded)",headA,1.5127806222726004
+"A+B+C (reference, excluded)",headB,0.0952209221762438
+"A+B+C (reference, excluded)",headC,5.444970116337002
+"A+B+C (reference, excluded)",bucket_en,0.21773401164020104
+"A+B+C (reference, excluded)",bucket_hi,0.012370918291846198
+"A+B+C (reference, excluded)",bucket_te,-0.040618112629609286
+"A+B+C (reference, excluded)",bucket_cm,-0.2345100266241824

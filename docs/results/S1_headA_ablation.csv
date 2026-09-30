@@ -1,0 +1,21 @@
+bucket,variant,auroc_seen,auroc_heldout_llama
+en,(a) 9-number surface probe,0.9180312917538795,
+en,"(b) Head A, all 40",0.9861029408411653,
+en,(c1) minus format-adjacent,0.9820512469732,
+en,(c2) c1 minus sent-length,0.9695404736172484,
+en,syntax-only (15 parser),0.9454355171894879,
+hi,(a) 9-number surface probe,0.8363731214510725,0.712746023406224
+hi,"(b) Head A, all 40",0.9734495074138726,0.9468919566096777
+hi,(c1) minus format-adjacent,0.9635727041072252,0.9320735943014167
+hi,(c2) c1 minus sent-length,0.9423242841951083,0.9158742926754421
+hi,syntax-only (15 parser),0.9045576757158049,0.8311255352883465
+te,(a) 9-number surface probe,0.8709431849986006,
+te,"(b) Head A, all 40",0.9728967254408061,
+te,(c1) minus format-adjacent,0.961556115309264,
+te,(c2) c1 minus sent-length,0.9421102714805487,
+te,syntax-only (15 parser),0.8549342289392667,
+cm,(a) 9-number surface probe,0.9127173222434011,
+cm,"(b) Head A, all 40",0.927547218852885,
+cm,(c1) minus format-adjacent,0.805810662507942,
+cm,(c2) c1 minus sent-length,0.7477256974527811,
+cm,syntax-only (15 parser),0.7082105931958644,

@@ -11,11 +11,9 @@ hi/te/cm calibration data is all `native` (see src/data/schema.py's
 WRITER_L1_BANDS comment) so no split is possible there yet.
 
 The unmatched-human robustness check ("do the length_match-trimmed surplus
-human rows in splits.json's `excluded` block get flagged more?") needs
-Head B (mGPT, GPU) scored on text that was never scored -- those ids are not
-in results/scores.parquet and this sprint is explicitly no-GPU. That row is
-written with fpr=NaN and a note rather than a fabricated number; see
-docs/results/README.md.
+human rows in splits.json's `excluded` block get flagged more?") scores those
+rows with headA + mGPT (GPU, cached in results/norm/unmatched_scores.parquet)
+and applies the same fuser, temperature and tau; see src/eval/unmatched.py.
 
 Writes: results/exp07_fairness.csv, results/T5_fairness.csv
 Serves: docs/master-execution-plan.md Phase 3 §3.6.
@@ -36,8 +34,6 @@ ALPHAS = (0.01, 0.05)
 
 def run(config_path: str) -> "pd.DataFrame":
     """Compute FPR by bucket and L1 band, per-bucket vs global tau; write the T5 table."""
-    import json
-
     import numpy as np
     import pandas as pd
 
@@ -107,16 +103,36 @@ def run(config_path: str) -> "pd.DataFrame":
                 "tau_per_bucket": None, "tau_global": None,
             })
 
-    # Unmatched-human robustness check: NOT COMPUTABLE today (needs GPU headB rescoring).
-    splits = json.load(open("data/processed/splits.json", encoding="utf-8"))
-    n_excluded = len(splits["excluded"]["length_match"]) + len(splits["excluded"]["clean"])
+    # Unmatched-human robustness check: human rows the length matching trimmed out of the
+    # corpus (en/hi/te; cm trims machine). Scored once by headA + mGPT, then pushed through
+    # the same fuser / per-bucket temperature / tau as every other row (src/eval/unmatched.py).
+    from src.eval.unmatched import score_unmatched
+    from src.utils.config import load_config
+
+    un = score_unmatched(load_config("configs/data.yaml"), load_config(config_path))
+    un_buckets = un["language"].tolist()
+    un_logit = artifacts.fuser_ab.decision_function(un[["headA", "headB"]].to_numpy(dtype=float), un_buckets)
+    un_prob = np.array([artifacts.temperature.transform(np.array([lg]), bucket=b)[0]
+                        for lg, b in zip(un_logit, un_buckets)])
+    matched_len = {b: float(np.median([r["length_words"] for r in test_human if r["language"] == b]))
+                   for b in LANGUAGE_BUCKETS if any(r["language"] == b for r in test_human)}
     for alpha in ALPHAS:
-        rows.append({
-            "alpha": alpha, "bucket": "ALL", "group": "unmatched_human_robustness_check",
-            "n_human": n_excluded,
-            "fpr_per_bucket_tau": float("nan"), "fpr_global_tau": float("nan"),
-            "tau_per_bucket": None, "tau_global": None,
-        })
+        calibrator = artifacts.conformal[alpha]
+        tau_global = calibrator.threshold("_global")
+        for bucket in LANGUAGE_BUCKETS:
+            m = np.array([b == bucket for b in un_buckets])
+            if not m.any():
+                continue
+            tau_b = calibrator.threshold(bucket)
+            rows.append({
+                "alpha": alpha, "bucket": bucket, "group": "unmatched_human_robustness_check",
+                "n_human": int(m.sum()),
+                "fpr_per_bucket_tau": float((un_prob[m] > tau_b).mean()),
+                "fpr_global_tau": float((un_prob[m] > tau_global).mean()),
+                "tau_per_bucket": tau_b, "tau_global": tau_global,
+                "median_length_words": float(un.loc[m, "length_words"].median()),
+                "matched_median_length_words": matched_len.get(bucket),
+            })
 
     df = pd.DataFrame(rows)
     write_csv(df, RESULTS_CSV)

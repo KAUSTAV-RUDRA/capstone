@@ -63,6 +63,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", required=True, help="configs/data.yaml (generator roles)")
     ap.add_argument("--corpus", default="data/processed/corpus.jsonl")
+    ap.add_argument("--out-csv", default=None, help="also write the table as CSV (supplementary S1)")
     ap.add_argument("--features", default="results/norm/features/stylometric.parquet",
                     help="cached Head A features computed on NORMALISED text")
     args = ap.parse_args()
@@ -92,6 +93,11 @@ def main() -> None:
             m = lr().fit(X.loc[tr.id, cols].to_numpy(), tr.label)
             rows.append((b, name, {k: (auc(s.label, m.predict_proba(X.loc[s.id, cols].to_numpy())[:, 1])
                                        if s.label.nunique() == 2 else np.nan) for k, s in sets.items()}))
+
+    if args.out_csv:
+        Path(args.out_csv).parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame([{"bucket": b, "variant": name, "auroc_seen": r["SEEN"], "auroc_heldout_llama": r["LLAMA"]}
+                      for b, name, r in rows]).to_csv(args.out_csv, index=False)
 
     print(f"features per variant: " + ", ".join(f"{k.split(' ')[0]}={len(v)}" for k, v in VARIANTS.items()))
     print(f"\n{'bucket':6}{'variant':32}{'SEEN test':>11}{'held-out llama':>16}")

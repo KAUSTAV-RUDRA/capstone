@@ -1,3 +1,5 @@
+> **Superseded (v1 corpus, raw text).** See [README.md](README.md): T3 for held-out results, the Head C section for the v2 diagnosis.
+
 # Head C shortcut diagnosis
 
 Pre-fusion check (Review-2 Day 4): is Head C's 1.000 AUROC (en/hi/te) a real semantic signal or a shortcut on length / domain / a trivial embedding direction? All numbers are test-split, per bucket.
