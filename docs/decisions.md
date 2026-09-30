@@ -1967,6 +1967,17 @@ docs/results/followup_exp11_exp12.md.
 
 ---
 
+## 2026-09-30 — Both operating points reported (exp13): alpha 0.05 buys most of the recall
+
+Recall at alpha 0.01 -> 0.05: en 0.80 -> 0.95, hi 0.39 -> 0.82 (seen 0.31 -> 0.88, llama 0.46 -> 0.75),
+te 0.16 -> 0.90, cm 0.32 -> 0.47. Empirical human FPR at 0.05: en 0.052, hi 0.045, te 0.050, cm 0.034; all
+Wilson intervals contain 0.05 and binomial tests show no violation (p >= 0.45), but n~400 per bucket cannot
+separate 0.05 from 0.06. At 0.01 every bucket <= 0.010. Gate false-clear rate is unchanged by alpha (HUMAN
+cutoff fixed): en 0.2%, hi 0.8%, te 1.3%, cm 9.5%; machine abstention falls (hi 60% -> 18%, te 83% -> 8%).
+Risk-coverage per alpha in docs/results/alpha_operating_points.md. The paper should report both points.
+
+---
+
 ## Decisions still open (fill as resolved)
 
 - [ ] Phase 0.1 — what "patent" means (disclosure / IPR-cell / IPO provisional).
