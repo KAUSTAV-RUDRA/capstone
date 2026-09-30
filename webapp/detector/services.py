@@ -12,7 +12,7 @@ request.
 
 Requires, ahead of time (Day 2-4 pipeline outputs, all gitignored under
 ``results/``):
-  results/models/headA.joblib          python -m src.eval.score --column headA
+  results/norm/models/headA.joblib     python -m src.eval.score --config configs/models_norm.yaml --column headA
   results/models/fuser_ab.joblib       python -m experiments.exp04_fusion --config configs/default.yaml
   results/calibration.json             python -m scripts.export_calibration --config configs/default.yaml
 Missing any of these raises a clear RuntimeError naming the command to run.
@@ -42,6 +42,7 @@ from src.data.schema import LANGUAGE_BUCKETS
 from src.features.language_id import LanguageIdentifier
 from src.fusion.fuser import Fuser
 from src.utils.config import load_config
+from src.utils.text import collapse_whitespace
 
 if TYPE_CHECKING:
     from src.features.curvature import CurvatureScorer
@@ -49,10 +50,14 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("detector.services")
 
-MODELS_CONFIG_PATH = "configs/models.yaml"
+# Whitespace-normalised variant: Head A / Head B are fitted and cached on text with
+# newlines and whitespace runs collapsed (decisions.md 2026-09-30, newline artefact),
+# so inference must collapse them too or it feeds the models a distribution they
+# were not fitted on. The flag is read from this config so the two cannot drift.
+MODELS_CONFIG_PATH = "configs/models_norm.yaml"
 DEFAULT_CONFIG_PATH = "configs/default.yaml"
 CALIBRATION_PATH = Path("results/calibration.json")
-HEAD_A_DEFAULT_PATH = "results/models/headA.joblib"
+HEAD_A_DEFAULT_PATH = "results/norm/models/headA.joblib"
 FUSER_AB_DEFAULT_PATH = "results/models/fuser_ab.joblib"
 
 #: Loaded once per process, on first use. Never cleared during the process's life.
@@ -179,6 +184,10 @@ def analyse_text(text: str, language: str | None) -> dict[str, Any]:
         model_version.
     """
     text = text or ""
+    if "normalise" not in _cache:
+        _cache["normalise"] = load_config(MODELS_CONFIG_PATH).get("text_normalisation") == "whitespace"
+    if _cache["normalise"]:
+        text = collapse_whitespace(text)
     detected = _get_language_identifier().identify(text)
     bucket = _resolve_language(text, language)
 

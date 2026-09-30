@@ -35,6 +35,7 @@ from typing import Any
 from src.utils.config import load_config
 from src.utils.io import read_jsonl
 from src.utils.resumable import DEFAULT_BATCH_SIZE, read_done_ids, run_resumable
+from src.utils.text import normalise_rows
 
 log = logging.getLogger("score")
 
@@ -53,6 +54,7 @@ class ScoreContext:
     cache: dict[str, Any] = field(default_factory=dict)   # loaded models, reused across batches
     corpus_path: Path = Path(DEFAULT_CORPUS)               # supervised columns fit on its train split
     max_minutes: float = 0
+    normalise: bool = False                                # collapse whitespace before any feature extraction
 
 
 ColumnFn = Callable[[Sequence[str], Sequence[dict[str, Any]], ScoreContext], Sequence[float]]
@@ -125,6 +127,12 @@ def stylometric_features(rows: Sequence[dict[str, Any]], cfg: dict[str, Any],
     return {r["id"]: have[r["id"]] for r in rows}
 
 
+def _corpus_rows(ctx: ScoreContext) -> list[dict[str, Any]]:
+    """The corpus as scoring sees it: whitespace-collapsed when ``text_normalisation`` is on."""
+    rows = read_jsonl(ctx.corpus_path)
+    return normalise_rows(rows) if ctx.normalise else rows
+
+
 def fit_headA(ctx: ScoreContext) -> Any:
     """Fit Head A on the corpus's train split, save it, log train CV AUROC."""
     import numpy as np
@@ -132,7 +140,7 @@ def fit_headA(ctx: ScoreContext) -> Any:
     from src.features.stylometric import SYNTAX_FEATURE_NAMES, HeadA, StylometricExtractor
 
     cfg = ctx.models_config["head_a"]
-    corpus = read_jsonl(ctx.corpus_path)
+    corpus = _corpus_rows(ctx)
     feats = stylometric_features(corpus, cfg, ctx.max_minutes)
     train = [r for r in corpus if r["split"] == "train"]
     X = np.asarray([feats[r["id"]] for r in train], dtype=float)
@@ -338,7 +346,7 @@ def fit_headC(ctx: ScoreContext) -> Any:
     from src.features.semantic import HeadC
 
     cfg = ctx.models_config["head_c"]
-    corpus = read_jsonl(ctx.corpus_path)
+    corpus = _corpus_rows(ctx)
     embs = muril_embeddings(corpus, cfg, ctx.max_minutes)
     train = [r for r in corpus if r["split"] == "train"]
     X = np.asarray([embs[r["id"]] for r in train], dtype=float)
@@ -476,6 +484,10 @@ def main(argv: list[str] | None = None) -> None:
     ctx = ScoreContext(config=load_config(args.config), device=args.device,
                        models_config=load_config(args.config), corpus_path=Path(args.corpus),
                        max_minutes=args.max_minutes)
+    ctx.normalise = ctx.config.get("text_normalisation") == "whitespace"
+    if ctx.normalise:
+        rows = normalise_rows(rows)
+        log.info("text_normalisation=whitespace: newlines/whitespace runs collapsed before scoring")
     column_fn = COLUMN_REGISTRY[args.column]
     if args.column == "headA":            # fit once, up front, not inside the first batch
         ctx.cache["headA"] = fit_headA(ctx)

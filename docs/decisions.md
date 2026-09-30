@@ -1797,6 +1797,117 @@ this change (stale registry assertions such as "two held-out generators", plus
 data/processed/archive/v1/*` against `docs/data/corpus_card.md` §0; `pytest
 tests/data/test_freeze_splits.py` (5 passed).
 
+## 2026-09-30 — Newline artefact: whitespace normalisation at scoring time; Head C stays excluded
+
+**Finding.** In corpus v2 every human row has 0 newlines; every generator's rows
+average 3.7-9.8 per text (en gemma 5.55, mistral 7.58, qwen7b 3.71; hi llama 7.14; te
+gemma 9.83). Newline count alone separates human from machine at test AUROC 0.922 (en),
+0.947 (hi), 0.938 (te); cm has no newlines on either side. The human sources are single
+paragraph / flattened passages; a real student essay has paragraph breaks, so this is a
+property of how the proxy corpus was built, not of human writing. Found while diagnosing
+Head C (`scripts/diagnose_headc_v2.py`); Head C and TF-IDF are blind to it (MuRIL ids
+identical with `\n` -> space on 300/300 texts), but Head A's sentence splitter counts
+`\n` as a terminator (`src/features/stylometric.py:94`) and the mGPT/Qwen tokenisers see it.
+
+**Decision.** Collapse newlines and whitespace runs to one space, in memory, before any
+feature extraction or tokenisation, identically for human and machine text
+(`src/utils/text.py`, switched on by `text_normalisation: whitespace` in
+`configs/models_norm.yaml`, applied in `src/eval/score.py`). `corpus.jsonl` and
+`splits.json` are untouched. Normalised caches, models and scores live under
+`results/norm/`; the raw-text results are kept for comparison. Only headA, headB,
+headB_word and headC were re-scored normalised; fastdetectgpt_en, ppl and binoculars
+were NOT, and still saw the newlines.
+
+**Effect (test AUROC, raw -> normalised).** Head A, seen: en 0.989->0.986, hi 0.973->0.973,
+te 0.977->0.973, cm 0.928->0.928; llama hi 0.940->0.947. Head A does not depend on the
+newline gap. Head B, seen: hi 0.350->0.336, te 0.251->0.235 (still inverted); llama hi
+0.819->0.785. Head C: unchanged everywhere (0.961 on llama hi).
+The nine-number surface-format probe falls but does not reach chance: en 0.989->0.918,
+hi 0.970->0.836, te 0.980->0.871, cm 0.913->0.913 (unchanged); llama hi 0.982->0.713.
+What remains is digit share, punctuation share and word length, i.e. register/source
+differences between scraped news/wiki text and prompted generations, not formatting.
+
+**cm terminal punctuation: kept, not normalised.** cm human rows end in terminal
+punctuation 38% of the time (cmu_hinglish_dog 39%, comi_lingua 33%, hinge 80%); machine
+97-100% in every domain including chat, where humans are at 39%. Within-domain AUROC of
+this one feature is 0.83-0.89. It is a genuine register difference (informal Hinglish
+omits final punctuation, LLMs complete sentences), not a corpus-processing artefact like
+newlines, and stripping it from real text would alter what the scorers are meant to see.
+It is not what drives the lexical signal: stripping trailing punctuation from all cm
+texts leaves TF-IDF AUROC at 0.941 (word) and 0.947 (char, from 0.959). It is a
+fairness risk: a careful writer who punctuates every sentence looks machine-like on this
+cue. Reliance of Head A on it is untested. Revisit with an independent cm human sample.
+
+**Head C stays excluded; reported as a diagnostic only.** TF-IDF also transfers to
+held-out llama hi (word 0.911, char 0.921 vs Head C 0.961), across held-out generators
+(leave-one-generator-out 0.91-1.00 en/hi) and across domains (0.90-1.00 en/hi/te), so
+the held-out test cannot separate a real signal from a provenance difference. Every
+human row comes from one scraped source per domain, every machine row from a prompted
+generation. Pooled length matching explains none of it (length alone 0.507 on en seen
+test; Head C per generator 0.999-1.000 raw and length-stratified).
+
+**Not done.** Tables, fusion, calibration untouched. Web inference does not yet
+normalise whitespace, so it would not match a normalised Head A if that were adopted.
+
+**Verify:** `python scripts/report_norm_compare.py --config configs/data.yaml
+--norm-scores results/norm/scores_a.parquet results/norm/scores_gpu.parquet`.
+
+---
+
+## 2026-09-30 — Normalisation adopted; Head A is not surface artefact (except cm); provenance confound bounds all AUROCs
+
+**Adopted.** Whitespace normalisation (previous entry) is now the scoring and inference
+default: `configs/models_norm.yaml` is the canonical models config, `webapp/detector/
+services.py` reads it (`MODELS_CONFIG_PATH`), collapses whitespace on submitted text
+before language ID, Head A and Head B, and loads Head A from `results/norm/models/`.
+`configs/models.yaml` and `results/` (raw-text) are kept only for raw-vs-normalised
+comparison. `fastdetectgpt_en` and `ppl` were re-scored normalised; `binoculars` — see the
+progress note at the end of this entry.
+
+**Is Head A reducible to the surface-format probe?** (`scripts/headA_surface_ablation.py`,
+normalised text, test AUROC, seen / held-out llama hi.) (a) 9-number surface probe;
+(b) Head A, 40 features; (c1) Head A minus 14 format-adjacent features (digit, uppercase,
+punctuation shares, comma/period/question/exclaim/quote, punct diversity, word-length
+mean/std/burstiness, clause counts); (c2) c1 minus 3 sentence-length features;
+syntax-only = 15 parser features.
+
+| bucket | (a) probe | (b) Head A | (c1) | (c2) | syntax-only |
+|---|---|---|---|---|---|
+| en | 0.918 | 0.986 | 0.982 | 0.970 | 0.945 |
+| hi | 0.836 | 0.973 | 0.964 | 0.942 | 0.905 |
+| hi, llama | 0.713 | 0.947 | 0.932 | 0.916 | 0.831 |
+| te | 0.871 | 0.973 | 0.962 | 0.942 | 0.855 |
+| cm | 0.913 | 0.928 | **0.806** | **0.748** | 0.708 |
+
+Reading: in en, hi and te, Head A with every format-adjacent feature removed keeps
+0.96-0.98 seen and 0.93 on held-out llama, well above the probe; the stylometric signal
+is real beyond surface format. In cm it is not: removing them drops Head A to 0.806
+(0.748 with sentence length), below the probe's 0.913, so cm Head A is largely surface
+form (chiefly terminal punctuation) plus what the English parser makes of romanised text.
+Do not present cm Head A as a stylometric result without this caveat.
+
+**Residual surface separability is a provenance confound.** After normalisation the
+9-number probe still reaches 0.84-0.92 (en 0.918, hi 0.836, te 0.871, cm 0.913). This is
+not removable by normalisation: every human row is scraped, single-source-per-domain text
+(news, wiki, forum, chat) and every machine row is a prompted generation, so any
+difference between those two pipelines (register, digits, punctuation, word length) is
+learnable. It bounds what any AUROC on this corpus can claim: a number here is
+"scraped human vs prompted generation", not "human vs machine writing". An independent
+human sample per bucket (e.g. student essays) is the only clean test. Head C's held-out
+llama transfer (0.961) and TF-IDF's (0.911) are consistent with this, so Head C stays
+excluded and is reported as a diagnostic only.
+
+**cm terminal punctuation: kept (real register difference).** Informal Hinglish omits
+final punctuation, LLMs complete sentences; stripping it would alter real text.
+**Limitations (paper / report):** a careful writer who punctuates every sentence will
+look machine-like on this cue, a fairness risk for exactly the students the project
+protects. Head A's reliance on it is untested beyond the cm ablation above.
+
+**Known consequence.** `results/models/fuser_ab.joblib` was archived to
+`data/processed/archive/v1/results/models/` in the v2 re-score, and no v2 fuser exists,
+so the webapp's `_get_fuser()` raises until fusion is refit on the normalised scores.
+Tables, fusion and calibration are deliberately not rebuilt yet.
+
 ---
 
 ## Decisions still open (fill as resolved)

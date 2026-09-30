@@ -1,0 +1,141 @@
+# Model configuration.
+
+# Head B scorer: LOCKED 2026-09-13 on measured tokenizer fertility
+# (results/tokenizer_fertility.csv, scripts/tokenizer_fertility.py).
+#
+#   tokens/word   en      hi      te       cm
+#   mGPT          1.363   3.560   6.319    1.714
+#   Qwen2.5-0.5B  1.339   4.804  11.919    1.672
+#
+# The two are equivalent on en and cm, but Qwen needs 1.9x as many tokens per
+# Telugu word and 1.35x per Hindi word. Curvature is computed from per-token
+# log-probabilities, so that fragmentation directly degrades the Head B signal
+# in exactly the buckets this project exists to cover. Fallback is kept for
+# hosts where mGPT-1.3B does not fit; using it costs Indic sensitivity.
+scorer_model: "ai-forever/mGPT"
+scorer_model_fallback: "Qwen/Qwen2.5-0.5B"
+
+# Head C encoder (MuRIL): encoder-only, embeddings ONLY, never curvature
+# (non-negotiable #9). Used only if VRAM >= head_c_vram_threshold_gb.
+semantic_model: "google/muril-base-cased"
+
+# Supervised baseline (XLM-R). No fine-tuning above 2B params (non-negotiable #5).
+supervised_baseline: "xlm-roberta-base"
+
+# Perturbation model for the DetectGPT baseline.
+perturbation_model: "google/mt5-small"
+
+load_in_8bit: false      # set true to fit the 4GB VRAM floor
+max_length: 512
+device: cpu
+
+# Hardware gates (non-negotiable #5).
+vram_floor_gb: 4
+head_c_vram_threshold_gb: 7.5   # GiB, matching scripts/check_hardware.py: an "8 GB" card is 7.9956 GiB
+
+# Machine-text generators live in configs/data.yaml under machine_corpus.generators
+# (one registry, read by src/data/generate.py): seen = qwen7b, gemma, mistral;
+# held-out, TEST ONLY (non-negotiable #4) = llama, phi. All via local Ollama, Q4_K_M.
+
+# --- Head A (src/features/stylometric.py; review2-sprint Day 2, parts-plan Part 14) ---
+# python -m src.eval.score --column headA
+# 25 surface features + 15 parser features (UPOS ratios, POS n-grams, tree depth,
+# dependency distance), one logistic regression per bucket fit on the train split.
+# Parsers run on CPU. cm has no Hinglish parser, so it shares en's spaCy model.
+head_a:
+  taggers: {en: spacy, cm: spacy, hi: stanza, te: stanza}
+  spacy_model: en_core_web_sm            # pinned wheel in requirements.txt
+  stanza_processors: tokenize,pos,lemma,depparse
+  features_cache: results/norm/features/stylometric.parquet   # tagging is the slow part; refits reuse it
+  model_path: results/norm/models/headA.joblib
+  C: 1.0
+  class_weight: balanced                 # train is not 1:1 (cm 596 human : 82 machine)
+  cv_folds: 5                            # per-bucket CV AUROC on train = the instability report
+
+# --- Head B (src/features/curvature.py; review2-sprint Day 2, parts-plan Part 15) ---
+# python -m src.eval.score --column headB      (then --column headB_word: same cache)
+# One mGPT forward pass yields both columns: headB = token-level Fast-DetectGPT,
+# headB_word = per-word standardised curvature (Patent 2). Both cached per row.
+head_b:
+  scorer: ai-forever/mGPT
+  device: cuda                           # fp16 weights; softmax statistics in fp32
+  load_in_8bit: false
+  batch_size: 8
+  # mGPT's full context. At 512, 66 % of hi and 100 % of te texts were truncated
+  # (te median 988 mGPT tokens); 2048 scores >99 % of texts whole.
+  max_length: 2048
+  vocab_chunk_positions: 512             # positions per fp32 softmax over the 100k vocab
+  word_var_floor: 1.0e-4                 # nats^2; guards near-deterministic words in headB_word
+  # rows * max(length) per sub-batch. Measured: 8 rows x 2048 tokens peaked at
+  # 7.88 GiB of the 7.9956 GiB card (transformer-body attention is dense over
+  # padding, not just real tokens); 8192 brought that isolated case down to
+  # 5.3 GiB. Lowered further to 6144 after a sustained run OOM'd at row 216/6784
+  # from allocator fragmentation, not true usage (card was idle right after) -
+  # see docs/decisions.md. CurvatureScorer also empties the cache every group
+  # and bisects a group that OOMs anyway.
+  max_batch_tokens: 6144
+  stats_cache: results/norm/features/curvature_mgpt.parquet
+
+# --- Baselines on Qwen2.5-0.5B (review2-sprint Day 3, parts-plan Part 17) ---
+# python -m src.eval.score --column fastdetectgpt_en   (then --column ppl: same cache)
+# Same CurvatureScorer machinery as head_b (src/features/curvature.py), different
+# scorer model, sharing one forward pass for both columns via full_stats().
+# fastdetectgpt_en is the decisive test for whether headB's hi/te inversion is
+# mGPT-specific (pretraining overlap) or a property of curvature on this corpus's
+# Indic text: Qwen2.5-0.5B has different pretraining data.
+qwen_baseline:
+  scorer: Qwen/Qwen2.5-0.5B
+  device: cuda
+  load_in_8bit: false
+  batch_size: 8
+  # Qwen's tokenizer fragments Indic text far worse than mGPT's (locked-decision
+  # table above: te 11.919 tok/word vs mGPT's 6.319). Measured on this corpus:
+  # te p99 = 3453 tokens, max 4108. 4096 keeps >99% of texts whole.
+  max_length: 4096
+  vocab_chunk_positions: 512
+  max_batch_tokens: 8192          # 0.5B model: smaller footprint than mGPT-1.3B
+  stats_cache: results/norm/features/curvature_qwen.parquet
+
+# --- Binoculars baseline (review2-sprint Day 3, parts-plan Part 17) ---
+# python -m src.eval.score --column binoculars
+# observer = Qwen2.5-0.5B, performer = Qwen2.5-0.5B-Instruct (share a tokenizer/
+# vocab, required for the cross-model term). Two models loaded at once, so
+# max_batch_tokens is halved from qwen_baseline's for the same VRAM headroom.
+binoculars:
+  observer: Qwen/Qwen2.5-0.5B
+  performer: Qwen/Qwen2.5-0.5B-Instruct
+  device: cuda
+  batch_size: 8
+  max_length: 4096
+  vocab_chunk_positions: 512
+  max_batch_tokens: 4096
+  # No separate stats_cache: unlike head_b/qwen_baseline, one pass here serves
+  # only this single column, so the CLI's own per-column journal
+  # (results/.score_binoculars.jsonl, never deleted after a merge) already
+  # gives free, permanent, resumable caching -- a second one would be inert.
+
+# --- Head C: MuRIL mean-pooled embeddings (review2-sprint Day 3, parts-plan Part 16) ---
+# python -m src.eval.score --column headC
+# NON-NEGOTIABLE #9: MuRIL is encoder-only -- embeddings ONLY, never curvature.
+# Per-bucket standardise -> logistic head over pooled embeddings, same design as
+# Head A (src/features/stylometric.py HeadA): per-language, not pooled, because
+# a fused single model would spend capacity telling buckets apart.
+head_c:
+  model: google/muril-base-cased
+  device: cuda
+  batch_size: 16
+  max_length: 512                 # MuRIL's own context limit
+  max_batch_tokens: 16384         # encoder, no autoregressive lm-head chunking needed
+  C: 1.0
+  class_weight: balanced
+  model_path: results/norm/models/headC.joblib
+  embeddings_cache: results/norm/features/muril_embeddings.parquet
+
+# --- Whitespace normalisation (decisions.md 2026-09-30, newline artefact) ---
+# Human corpus rows contain 0 newlines; every generator's rows contain 4-10 per text.
+# With this key set, src.eval.score collapses newlines/whitespace runs to single spaces
+# in memory before ANY feature extraction or tokenisation. The frozen corpus is untouched.
+# All caches/models/scores for this variant live under results/norm/ so the raw-text
+# results stay intact for side-by-side comparison. Only head_a/head_b/head_c caches are
+# redirected; qwen_baseline/binoculars are NOT re-scored under this config.
+text_normalisation: whitespace
