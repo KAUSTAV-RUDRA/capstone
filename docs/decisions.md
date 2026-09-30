@@ -1861,8 +1861,12 @@ default: `configs/models_norm.yaml` is the canonical models config, `webapp/dete
 services.py` reads it (`MODELS_CONFIG_PATH`), collapses whitespace on submitted text
 before language ID, Head A and Head B, and loads Head A from `results/norm/models/`.
 `configs/models.yaml` and `results/` (raw-text) are kept only for raw-vs-normalised
-comparison. `fastdetectgpt_en` and `ppl` were re-scored normalised; `binoculars` — see the
-progress note at the end of this entry.
+comparison. `fastdetectgpt_en` and `ppl` were re-scored normalised (test AUROC raw -> normalised, seen:
+fastdetectgpt_en en 0.807->0.822, hi 0.718->0.752, te 0.576->0.589, cm 0.714->0.714; ppl en
+0.900->0.901, hi 0.776->0.786, te 0.816->0.832, cm 0.748->0.748; llama hi 0.908->0.927 and
+0.882->0.887). **`binoculars` was NOT re-scored** (stopped for time, ~35 min needed); its
+`results/scores.parquet` column is still raw-text and not comparable with the rest. To finish:
+`python -m src.eval.score --config configs/models_norm.yaml --scores results/norm/scores_gpu.parquet --column binoculars`.
 
 **Is Head A reducible to the surface-format probe?** (`scripts/headA_surface_ablation.py`,
 normalised text, test AUROC, seen / held-out llama hi.) (a) 9-number surface probe;
