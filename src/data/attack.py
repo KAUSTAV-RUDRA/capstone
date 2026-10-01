@@ -119,11 +119,13 @@ def select_rows(corpus_path: Path, config: dict[str, Any], seed: int = 42) -> li
 
 
 # --- hybrid attack -----------------------------------------------------------
-# No WordNet / Indic WordNet is installed (nltk is not in requirements.txt), so
-# the synonym swap uses small in-repo tables of common, near-interchangeable
-# words. Coverage is partial by design: a sentence with no swappable word falls
-# through to a clause reorder or split/merge. Telugu is agglutinative, so whole-
-# token matching hits rarely there and the structural edits carry most of it.
+# English synonym swap uses WordNet (nltk) with spaCy POS tags, so only words
+# that need no inflection are touched (NN, JJ, RB, VB, VBP) and the swap stays in
+# the word's part of speech. hi/te/cm have no usable WordNet here, so they use
+# small in-repo tables of near-interchangeable words (cm also the English table).
+# Coverage is partial by design: a sentence with no swappable word falls through
+# to a clause reorder or split/merge. Telugu is agglutinative, so whole-token
+# matching hits rarely there and the structural edits carry most of it.
 _EN_SYN = [
     ("big", "large"), ("small", "little"), ("important", "significant"), ("help", "assist"),
     ("show", "demonstrate"), ("use", "employ"), ("start", "begin"), ("end", "finish"),
@@ -239,7 +241,7 @@ def _swap_case(src: str, dst: str) -> str:
 _LOWERABLE = frozenset(
     "the a an it its this that these those he she they we i you his her their our my your there "
     "in on at for with by as if when while although however but and so then also yaar yeh woh "
-    "main hum tum mujhe mera meri aap kya agar jab toh".split())
+    "many some most all each several other now what how why who main hum tum mujhe mera meri aap kya agar jab toh".split())
 
 
 def _recase(clause: str, upper: bool) -> str:
@@ -249,7 +251,55 @@ def _recase(clause: str, upper: bool) -> str:
     return clause[:1].lower() + clause[1:] if first in _LOWERABLE else clause
 
 
+_WN_POS = {"NN": "n", "JJ": "a", "RB": "r", "VB": "v", "VBP": "v"}
+_EN_NLP: Any = None
+
+
+def _en_nlp() -> Any:
+    global _EN_NLP
+    if _EN_NLP is None:
+        import spacy
+        _EN_NLP = spacy.load("en_core_web_sm", disable=["parser", "ner", "lemmatizer"])
+    return _EN_NLP
+
+
+def _wordnet_synonym(word: str, pos: str) -> str | None:
+    """Most frequent single-word synonym from the word's first WordNet sense, or None."""
+    from nltk.corpus import wordnet as wn
+
+    senses = wn.synsets(word, pos=pos if pos != "a" else None)
+    senses = [x for x in senses if x.pos() in (pos, "s")] if pos == "a" else senses
+    if not senses:
+        return None
+    lemmas = [l for l in senses[0].lemmas()
+              if l.name().isalpha() and l.name().lower() != word.lower()]
+    # The candidate must be corpus-attested and its own first sense must be this
+    # one, so "solve" -> "lick" (a rare sense of lick) is rejected.
+    lemmas = [l for l in lemmas if l.count() > 0
+              and wn.synsets(l.name(), pos=pos if pos != "a" else None)[:1] == senses[:1]]
+    return max(lemmas, key=lambda l: l.count()).name() if lemmas else None
+
+
+def _edit_synonym_en(sentence: str, rng: random.Random) -> str | None:
+    cands = []
+    for tok in _en_nlp()(sentence):
+        pos = _WN_POS.get(tok.tag_)
+        if pos and tok.is_alpha and len(tok.text) >= 4 and not tok.is_stop:
+            syn = _wordnet_synonym(tok.text.lower(), pos)
+            if syn:
+                cands.append((tok, syn))
+    if not cands:
+        return None
+    chosen = sorted(rng.sample(cands, min(2, len(cands))), key=lambda c: c[0].idx, reverse=True)
+    out = sentence
+    for tok, syn in chosen:
+        out = out[:tok.idx] + _swap_case(tok.text, syn) + out[tok.idx + len(tok.text):]
+    return out if out != sentence else None
+
+
 def _edit_synonym(sentence: str, bucket: str, rng: random.Random) -> str | None:
+    if bucket == "en":
+        return _edit_synonym_en(sentence, rng)
     table = _SYN[bucket]
     hits = [m for m in _WORD_RE.finditer(sentence) if m.group(0).lower() in table]
     if not hits:
@@ -379,7 +429,8 @@ def run_hybrid(rows: list[dict[str, Any]], out_path: str | Path, seed: int) -> d
         totals["no_change"] += text == r["text"]
         new = dict(r)
         new.update(id=new_id, text=text, attack_type="hybrid",
-                   length_words=len(text.split()), source_id=r["id"])
+                   length_words=len(text.split()), source_id=r["id"],
+                   attack_changed=text != r["text"])  # False rows stay in T4, reported as "attack produced no change"
         new_rows.append(new)
         totals["rows"] += 1
     append_rows(new_rows, out_path)

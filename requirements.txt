@@ -22,6 +22,7 @@ click==8.1.8                  # spacy's CLI imports it; typer >= 0.20 no longer 
 en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl   # Head A parser, en + cm
 stanza==1.10.1                # Head A parser, hi + te; models: python -c "import stanza; stanza.download('hi'); stanza.download('te')"
 indic-nlp-library==0.92
+nltk==3.10.3                  # en WordNet synonym swap in src/data/attack.py; data: python -m nltk.downloader wordnet omw-1.4  (WordNet 3.0)
 
 # --- Data sources / corpus building (src/data/build_human_corpus.py) ---
 datasets==5.0.1               # HF streaming loaders (wikimedia/wikipedia, ai4bharat/samanantar)
