@@ -12,7 +12,7 @@ RAID/DetectRL practice:
 ``hybrid``  (implemented, Part 23)
     20 % of sentences get a synonym swap, clause reorder, or split/merge. No GPU.
     Models the realistic case of a student editing generated text.
-``paraphrase``  (stub, Part 24)
+``paraphrase``  (implemented, Part 24)
     Qwen2.5-7B-Instruct 4-bit: "Rewrite in your own words, same language, same
     length".
 ``backtranslation``  (stub, Part 25)
@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import time
 import random
 import re
 import sys
@@ -438,10 +439,90 @@ def run_hybrid(rows: list[dict[str, Any]], out_path: str | Path, seed: int) -> d
 
 
 # --- stubs -------------------------------------------------------------------
-def apply_paraphrase(texts: Sequence[str], buckets: Sequence[str], config: dict[str, Any]) -> list[str]:
-    """Rewrite each text with Qwen2.5-7B-Instruct 4-bit, same language and length."""
-    # TODO(stage-6 part-24): batch prompts through the 4-bit generator.
-    raise NotImplementedError("apply_paraphrase lands in parts-plan Part 24")
+_BUCKET_LANG = {"en": "English", "hi": "Hindi (Devanagari script)", "te": "Telugu (Telugu script)",
+                "cm": "Hinglish: Hindi written in Roman letters, mixed with English words"}
+
+
+def paraphrase_prompt(text: str, bucket: str) -> str:
+    """Prompt for one rewrite: own words, same language and script, same length, no commentary."""
+    n_words = len(text.split())
+    return (f"Rewrite the following text in your own words. Keep it in the same language "
+            f"({_BUCKET_LANG[bucket]}) and the same script, keep the meaning, and keep the length "
+            f"close to {n_words} words. Do not translate: if the text mixes languages or is written in "
+            f"Roman letters, your rewrite must do the same and must not become plain English. "
+            f"Keep paragraph breaks. Output only the rewritten text, with "
+            f"no introduction, notes or explanation.\n\nText:\n{text}\n\nRewritten text:")
+
+
+def make_paraphrase_worker(client: Any, model: str, info: dict[str, Any], *, fertility: dict[str, float],
+                           cap: int, num_ctx: int, keep_alive: str, temperature: float, top_p: float,
+                           seed: int, retries: int = 2, retry_wait_s: float = 5.0):
+    """Return ``process_item(row) -> attacked row`` that paraphrases through Ollama (thread-safe)."""
+    from src.data.clean_artifacts import strip_boilerplate
+    from src.data.generate import token_budget
+
+    def process_item(row: dict[str, Any]) -> dict[str, Any]:
+        text = row["text"]
+        num_predict = token_budget(len(text.split()), fertility[row["language"]], 1.5, 128, cap)
+        options = {"num_predict": num_predict, "num_ctx": num_ctx, "temperature": temperature,
+                   "top_p": top_p, "seed": hash64(f"{seed}:{row['id']}")}
+        for attempt in range(retries + 1):
+            try:
+                resp = client.generate(model, paraphrase_prompt(text, row["language"]), options, keep_alive)
+                break
+            except Exception as exc:  # noqa: BLE001 - timeouts, dropped connections
+                if attempt == retries:
+                    raise
+                log.warning("%s: %s - retrying", row["id"], exc)
+                time.sleep(retry_wait_s)
+        out = strip_boilerplate((resp.get("response") or "").strip())
+        if not out:
+            raise RuntimeError(f"{row['id']}: empty paraphrase")
+        new = dict(row)
+        new.update(id=attacked_id(row["id"], "paraphrase"), text=out, attack_type="paraphrase",
+                   length_words=len(out.split()), source_id=row["id"], attack_changed=out != text,
+                   paraphrase_model=model, paraphrase_quant=info.get("quantization"),
+                   paraphrase_truncated=resp.get("done_reason") == "length",
+                   length_ratio=round(len(out.split()) / max(1, len(text.split())), 3))
+        return new
+
+    return process_item
+
+
+def hash64(key: str) -> int:
+    import hashlib
+    return int.from_bytes(hashlib.sha256(key.encode("utf-8")).digest()[:4], "big")
+
+
+def run_paraphrase(rows: list[dict[str, Any]], out_path: str | Path, config: dict[str, Any],
+                   seed: int, max_minutes: float, parallel: int | None = None):
+    """Paraphrase ``rows`` with Qwen2.5-7B-Instruct (4-bit, local Ollama); resumable and time-boxed."""
+    from src.data.generate import OllamaClient, describe_ollama_model, load_fertility, load_with_fallback
+    from src.utils.resumable import run_concurrent
+
+    mc = config["machine_corpus"]
+    spec = mc["generators"]["qwen7b"]
+    model = spec["ollama"]
+    oc = mc.get("ollama") or {}
+    client = OllamaClient(oc.get("host", "http://127.0.0.1:11434"), float(oc.get("request_timeout_s", 900)))
+    info = describe_ollama_model(client, model)
+    budget = mc.get("budget") or {}
+    fertility, src_model = load_fertility(budget.get("fertility_csv", "results/tokenizer_fertility.csv"),
+                                          spec.get("tokenizer"),
+                                          budget.get("fallback_tokenizer", "Qwen/Qwen2.5-0.5B"))
+    num_ctx = int(oc.get("num_ctx", 4608))
+    keep_alive = str(oc.get("keep_alive", "30m"))
+    workers = load_with_fallback(client, model, num_ctx, keep_alive, parallel or int(oc.get("parallel", 4)))
+    dec = mc.get("decoding") or {}
+    log.info("paraphrase: %s (%s), fertility from %s, %d workers", model, info["quantization"], src_model, workers)
+    worker = make_paraphrase_worker(client, model, info, fertility=fertility, cap=int(budget.get("cap", 3600)),
+                                    num_ctx=num_ctx, keep_alive=keep_alive,
+                                    temperature=float(dec.get("temperature", 0.8)),
+                                    top_p=float(dec.get("top_p", 0.95)), seed=seed)
+    # Interleave buckets/labels so a time-boxed run covers every cell evenly instead of one bucket first.
+    order = random.Random(seed).sample(rows, len(rows))
+    return run_concurrent(order, id_of=lambda r: attacked_id(r["id"], "paraphrase"), process_item=worker,
+                          out_path=out_path, workers=workers, max_minutes=max_minutes, label="paraphrases")
 
 
 def apply_backtranslation(texts: Sequence[str], buckets: Sequence[str], config: dict[str, Any]) -> list[str]:
@@ -480,6 +561,11 @@ def main(argv: list[str] | None = None) -> None:
         rows = select_rows(Path(args.corpus), config, seed)
         totals = run_hybrid(rows, args.out, seed)
         log.info("hybrid: selected %d rows; %s", len(rows), totals)
+        return
+    if args.attack == "paraphrase":
+        rows = select_rows(Path(args.corpus), config, seed)  # same seed => same sources as hybrid
+        report = run_paraphrase(rows, args.out, config, seed, args.max_minutes)
+        log.info("paraphrase: %s", report.summary())
         return
     raise NotImplementedError(f"the '{args.attack}' attack lands in {part}.")
 
