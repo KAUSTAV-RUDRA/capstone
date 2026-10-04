@@ -10,7 +10,7 @@
       <div class="card-body text-center">
         <div class="text-uppercase text-muted small">Verdict</div>
         <div class="display-5 fw-bold my-2">{{ decision.verdict }}</div>
-        <div class="fs-5">Confidence: {{ decision.confidence }}</div>
+        <div class="fs-5">Confidence: {{ decision.confidence|floatformat:3 }}</div>
         <div class="text-muted small mt-2">
           Driven by the <strong>{{ decision.driving_head }}</strong> head
         </div>
@@ -21,9 +21,9 @@
       <h6 class="card-title">Head scores</h6>
       <table class="table table-sm mb-0">
         <tbody>
-          <tr><th scope="row">Stylometric (Head A)</th><td>{{ decision.stylometric_score }}</td></tr>
-          <tr><th scope="row">Curvature (Head B)</th><td>{{ decision.curvature_score }}</td></tr>
-          <tr><th scope="row">Semantic (Head C)</th><td>{{ decision.semantic_score|default:"n/a" }}</td></tr>
+          <tr><th scope="row">Stylometric (Head A)</th><td>{{ decision.stylometric_score|floatformat:3 }}</td></tr>
+          <tr><th scope="row">Curvature (Head B)</th><td>{{ decision.curvature_score|floatformat:3 }}</td></tr>
+          <tr><th scope="row">Semantic (Head C)</th><td>{{ decision.semantic_score|floatformat:3|default:"n/a" }}</td></tr>
         </tbody>
       </table>
     </div></div>
