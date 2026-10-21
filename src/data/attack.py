@@ -584,6 +584,7 @@ BT_ROUTES: dict[str, tuple[str, str]] = {
 #: IndicTrans2 cannot take Roman-script Hinglish, so cm is not attacked (reported, not forced).
 BT_NOT_APPLICABLE = ("cm",)
 BT_DEFAULTS = {
+    "backend": "nllb",  # IndicTrans2 is gated and its toolkit needs MSVC on Windows; see docs/progress.md
     "indictrans2": {"en_indic": "ai4bharat/indictrans2-en-indic-dist-200M",
                     "indic_en": "ai4bharat/indictrans2-indic-en-dist-200M"},
     "nllb": "facebook/nllb-200-distilled-600M",
@@ -610,7 +611,7 @@ class IndicTrans2Translator:
             model = AutoModelForSeq2SeqLM.from_pretrained(repo, trust_remote_code=True, torch_dtype=dtype)
             self.parts[key] = (tok, model.to(device).eval())
 
-    def translate(self, sentences: list[str], src: str, tgt: str) -> list[str]:
+    def translate(self, sentences: list[str], src: str, tgt: str, greedy: bool = False) -> list[str]:
         import torch
 
         tok, model = self.parts["en_indic" if src == "eng_Latn" else "indic_en"]
@@ -618,7 +619,7 @@ class IndicTrans2Translator:
         enc = tok(batch, truncation=True, max_length=self.max_length, padding="longest",
                   return_tensors="pt").to(self.device)
         with torch.inference_mode():
-            gen = model.generate(**enc, num_beams=self.num_beams, num_return_sequences=1,
+            gen = model.generate(**enc, num_beams=1 if greedy else self.num_beams, num_return_sequences=1,
                                  max_length=self.max_length, use_cache=False)
         dec = tok.batch_decode(gen, skip_special_tokens=True, clean_up_tokenization_spaces=True)
         return self.processor.postprocess_batch(dec, lang=tgt)
@@ -638,15 +639,19 @@ class NllbTranslator:
         dtype = torch.float16 if device == "cuda" else torch.float32
         self.model = AutoModelForSeq2SeqLM.from_pretrained(repo, torch_dtype=dtype).to(device).eval()
 
-    def translate(self, sentences: list[str], src: str, tgt: str) -> list[str]:
+    def translate(self, sentences: list[str], src: str, tgt: str, greedy: bool = False) -> list[str]:
         import torch
 
         self.tok.src_lang = src
         enc = self.tok(sentences, truncation=True, max_length=self.max_length, padding="longest",
                        return_tensors="pt").to(self.device)
         with torch.inference_mode():
+            # Cap output at ~1.5x the longest input: unbounded NLLB generation loops on a repeated token or
+            # hallucinates extra sentences, which both ruins the attack and burns CPU/GPU time.
             gen = self.model.generate(**enc, forced_bos_token_id=self.tok.convert_tokens_to_ids(tgt),
-                                      num_beams=self.num_beams, max_length=self.max_length)
+                                      num_beams=1 if greedy else self.num_beams,
+                                      max_new_tokens=min(self.max_length, int(1.5 * enc["input_ids"].shape[1]) + 10),
+                                      no_repeat_ngram_size=4, repetition_penalty=1.1)
         return self.tok.batch_decode(gen, skip_special_tokens=True)
 
 
@@ -655,8 +660,12 @@ def _bt_settings(config: dict[str, Any]) -> dict[str, Any]:
 
 
 def load_translator(config: dict[str, Any], device: str):
-    """IndicTrans2 distilled if it loads, else NLLB-200-distilled-600M; logs which one is used."""
+    """NLLB-200-distilled-600M by default; backend "indictrans2" tries IndicTrans2, falling back to NLLB."""
     bt = _bt_settings(config)
+    if bt["backend"] == "nllb":
+        tr = NllbTranslator(bt["nllb"], device, int(bt["num_beams"]), int(bt["max_length"]))
+        log.info("back-translation model: %s on %s", tr.name, device)
+        return tr
     try:
         tr = IndicTrans2Translator(bt["indictrans2"]["en_indic"], bt["indictrans2"]["indic_en"], device,
                                    int(bt["num_beams"]), int(bt["max_length"]))
@@ -667,18 +676,37 @@ def load_translator(config: dict[str, Any], device: str):
     return tr
 
 
-def _translate_all(translator: Any, sentences: list[str], src: str, tgt: str, batch: int) -> list[str]:
+def _translate_all(translator: Any, sentences: list[str], src: str, tgt: str, batch: int,
+                   greedy: bool = False) -> list[str]:
     """Translate in length-sorted batches (less padding); returns results in input order."""
     order = sorted(range(len(sentences)), key=lambda i: len(sentences[i]))
     out = [""] * len(sentences)
+    kw = {"greedy": True} if greedy else {}
     for start in range(0, len(order), batch):
         idx = order[start:start + batch]
-        for i, t in zip(idx, translator.translate([sentences[i] for i in idx], src, tgt)):
+        for i, t in zip(idx, translator.translate([sentences[i] for i in idx], src, tgt, **kw)):
             out[i] = t
     return out
 
 
-def backtranslate(texts: Sequence[str], bucket: str, translator: Any, batch: int = 16) -> list[str]:
+#: bucket -> Unicode name prefix of its script; an output must be mostly this script.
+BT_SCRIPT = {"en": "LATIN", "hi": "DEVANAGARI", "te": "TELUGU"}
+BT_SCRIPT_MIN_SHARE = 0.8
+
+
+def script_ok(text: str, bucket: str) -> bool:
+    """True if more than 80% of the letters in ``text`` are in the bucket's script (en Latin, hi Devanagari, te Telugu)."""
+    import unicodedata
+
+    letters = [c for c in text if c.isalpha()]
+    if not letters:
+        return False
+    hit = sum(unicodedata.name(c, "").startswith(BT_SCRIPT[bucket]) for c in letters)
+    return hit / len(letters) > BT_SCRIPT_MIN_SHARE
+
+
+def backtranslate(texts: Sequence[str], bucket: str, translator: Any, batch: int = 16,
+                  greedy: bool = False) -> list[str]:
     """Round-trip texts through the pivot language and back, sentence by sentence.
 
     Separators (paragraph breaks) are kept as in the source; a sentence whose
@@ -689,7 +717,8 @@ def backtranslate(texts: Sequence[str], bucket: str, translator: Any, batch: int
     own, pivot = BT_ROUTES[bucket]
     split = [split_sentences(t) for t in texts]
     flat = [s for sents, _ in split for s in sents if s.strip()]
-    back = _translate_all(translator, _translate_all(translator, flat, own, pivot, batch), pivot, own, batch)
+    back = _translate_all(translator, _translate_all(translator, flat, own, pivot, batch, greedy),
+                          pivot, own, batch, greedy)
     it = iter(back)
     out = []
     for sents, seps in split:
@@ -713,12 +742,28 @@ def ollama_vram_models(host: str = "http://127.0.0.1:11434") -> list[str]:
     return [m.get("name", "?") for m in models if int(m.get("size_vram", 0)) > 0]
 
 
-def make_bt_row(row: dict[str, Any], text: str, model_name: str) -> dict[str, Any]:
+def checked_backtranslation(texts: Sequence[str], bucket: str, translator: Any,
+                            batch: int = 16) -> list[tuple[str, bool]]:
+    """Back-translate with a script sanity check per output.
+
+    A failing output is retried once with greedy decoding; if it still fails the
+    source text is kept. Returns ``(text, failed)`` per input.
+    """
+    outs = backtranslate(texts, bucket, translator, batch)
+    res: list[tuple[str, bool]] = []
+    for src, out in zip(texts, outs):
+        if not script_ok(out, bucket):
+            out = backtranslate([src], bucket, translator, batch, greedy=True)[0]
+        res.append((out, False) if script_ok(out, bucket) else (src, True))
+    return res
+
+
+def make_bt_row(row: dict[str, Any], text: str, model_name: str, failed: bool = False) -> dict[str, Any]:
     new = dict(row)
     new.update(id=attacked_id(row["id"], "backtranslation"), text=text, attack_type="back_translation",
                length_words=len(text.split()), source_id=row["id"], attack_changed=text != row["text"],
                length_ratio=round(len(text.split()) / max(1, len(row["text"].split())), 3),
-               bt_model=model_name, bt_pivot=BT_ROUTES[row["language"]][1])
+               bt_model=model_name, bt_pivot=BT_ROUTES[row["language"]][1], bt_failed=failed)
     return new
 
 
@@ -730,7 +775,8 @@ def run_backtranslation(rows: list[dict[str, Any]], out_path: str | Path, config
     scoped = _apply_cap(rows, out_path, seed, "backtranslation", cap)
     na = [r for r in scoped if r["language"] in BT_NOT_APPLICABLE]
     scoped = [r for r in scoped if r["language"] not in BT_NOT_APPLICABLE]
-    totals = {"rows": 0, "skipped": 0, "changed": 0, "not_applicable": len(na)}
+    totals = {"rows": 0, "skipped": 0, "changed": 0, "failed": 0, "not_applicable": len(na)}
+    failures: dict[str, int] = defaultdict(int)
     if na:
         log.info("back-translation: attack not applicable to %s (Roman Hinglish cannot go through "
                  "IndicTrans2); %d source rows excluded - T4 reports cm as n/a for this attack",
@@ -752,12 +798,20 @@ def run_backtranslation(rows: list[dict[str, Any]], out_path: str | Path, config
         if deadline and time.monotonic() > deadline:
             log.info("back-translation: time budget reached; resume with the same command")
             break
-        outs = backtranslate([r["text"] for r in c], c[0]["language"], translator, int(bt["sentence_batch"]))
-        new = [make_bt_row(r, t, translator.name) for r, t in zip(c, outs)]
+        t0 = time.monotonic()
+        outs = checked_backtranslation([r["text"] for r in c], c[0]["language"], translator,
+                                       int(bt["sentence_batch"]))
+        new = [make_bt_row(r, t, translator.name, failed) for r, (t, failed) in zip(c, outs)]
         append_rows(new, out_path)
         totals["rows"] += len(new)
         totals["changed"] += sum(n["attack_changed"] for n in new)
-        log.info("back-translation: %d/%d rows", totals["rows"], len(todo))
+        for n in new:
+            failures[n["language"]] += n["bt_failed"]
+        totals["failed"] = sum(failures.values())
+        log.info("back-translation: %d/%d rows (%.1f s/row); script-check failures so far: %s",
+                 totals["rows"], len(todo), (time.monotonic() - t0) / len(c), dict(failures) or 0)
+    log.info("back-translation: script-check failures per bucket (source kept, bt_failed=true): %s",
+             {b: failures.get(b, 0) for b in sorted({r["language"] for r in todo})})
     return totals
 
 

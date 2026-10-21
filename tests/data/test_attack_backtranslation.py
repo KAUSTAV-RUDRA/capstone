@@ -3,25 +3,34 @@ import json
 import logging
 
 from src.data import attack
-from src.data.attack import (BT_ROUTES, attacked_id, backtranslate, ollama_vram_models, run_backtranslation)
+from src.data.attack import (BT_ROUTES, attacked_id, backtranslate, checked_backtranslation, ollama_vram_models,
+                            run_backtranslation, script_ok)
 from src.data.schema import ATTACK_TYPES
 
 
+SAMPLE = {"eng_Latn": "Hello there friend.", "hin_Deva": "नमस्ते मेरे दोस्त।", "tel_Telu": "హలో నా మిత్రమా."}
+PARA = chr(10) * 2
+LANG_TEXT = {"en": "First one. Second one." + PARA + "Third.",
+             "hi": "पहला वाक्य। दूसरा वाक्य।" + PARA + "तीसरा।",
+             "te": "మొదటి వాక్యం. రెండవ వాక్యం." + PARA + "మూడవది.",
+             "cm": "yeh ek test hai. aur doosra."}
+
+
 class FakeTranslator:
-    """Tags each sentence with the direction so the round trip is visible and checkable."""
+    """Returns text in the target script, so the script check passes; records every call."""
 
     name = "fake-mt"
 
     def __init__(self):
         self.calls = []
 
-    def translate(self, sentences, src, tgt):
-        self.calls.append((src, tgt, len(sentences)))
-        return [f"{s}|{src[:3]}>{tgt[:3]}" for s in sentences]
+    def translate(self, sentences, src, tgt, greedy=False):
+        self.calls.append((src, tgt, len(sentences), greedy))
+        return [SAMPLE[tgt] for _ in sentences]
 
 
 def _row(i, lang, label=1):
-    return {"id": f"{lang}_{i}", "text": f"First one. Second one.\n\nThird {i}.", "language": lang,
+    return {"id": f"{lang}_{i}", "text": LANG_TEXT[lang], "language": lang,
             "label": label, "length_words": 6, "split": "test", "attack_type": "clean"}
 
 
@@ -37,12 +46,12 @@ def test_backtranslate_round_trip_direction_and_paragraphs():
     out = backtranslate(["A b. C d.\n\nE f."], "hi", tr)[0]
     assert [c[:2] for c in tr.calls] == [("hin_Deva", "eng_Latn"), ("eng_Latn", "hin_Deva")]
     assert out.count("\n\n") == 1
-    assert "|hin>eng|eng>hin" in out
+    assert out.startswith(SAMPLE["hin_Deva"])
 
 
 def test_backtranslate_empty_translation_keeps_source():
     class Empty(FakeTranslator):
-        def translate(self, sentences, src, tgt):
+        def translate(self, sentences, src, tgt, greedy=False):
             return ["" for _ in sentences]
 
     assert backtranslate(["Keep me."], "en", Empty())[0] == "Keep me."
@@ -103,7 +112,7 @@ def test_fallback_to_nllb_is_logged(monkeypatch, caplog):
     monkeypatch.setattr(attack, "IndicTrans2Translator", Boom)
     monkeypatch.setattr(attack, "NllbTranslator", Nllb)
     with caplog.at_level(logging.INFO, logger="attack"):
-        tr = attack.load_translator({}, "cpu")
+        tr = attack.load_translator({"attack": {"backtranslation": {"backend": "indictrans2"}}}, "cpu")
     assert tr.name == "nllb-fake"
     assert "falling back" in caplog.text and "nllb-fake" in caplog.text
 
@@ -118,3 +127,40 @@ def test_ollama_vram_detection(monkeypatch):
     assert ollama_vram_models() == ["qwen2.5:7b-instruct"]
     monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: (_ for _ in ()).throw(OSError))
     assert ollama_vram_models() == []
+
+
+def test_script_ok_thresholds():
+    assert script_ok("Hello world", "en") and not script_ok("Hello в в в в в в в в в в", "en")
+    assert script_ok("नमस्ते मेरे प्यारे दुनिया hi", "hi") and not script_ok("hello world नमस्ते", "hi")
+    assert script_ok("హలో ప్రపంచం", "te") and not script_ok("", "te")
+
+
+class Flaky(FakeTranslator):
+    """Wrong script on beam search, right script on greedy (or never right)."""
+
+    def __init__(self, fix_on_greedy):
+        super().__init__()
+        self.fix = fix_on_greedy
+
+    def translate(self, sentences, src, tgt, greedy=False):
+        self.calls.append((src, tgt, len(sentences), greedy))
+        if greedy and self.fix:
+            return [SAMPLE[tgt] for _ in sentences]
+        return ["в в в в" for _ in sentences]
+
+
+def test_failed_check_retries_greedy_then_succeeds():
+    tr = Flaky(fix_on_greedy=True)
+    (text, failed), = checked_backtranslation(["Some source."], "en", tr)
+    assert not failed and script_ok(text, "en")
+    assert [c[3] for c in tr.calls] == [False, False, True, True]
+
+
+def test_failed_after_greedy_keeps_source_and_flags(tmp_path, caplog):
+    rows = [_row(0, "te")]
+    out = tmp_path / "a.jsonl"
+    with caplog.at_level(logging.INFO, logger="attack"):
+        totals = run_backtranslation(rows, out, {}, 42, 0, "cpu", translator=Flaky(fix_on_greedy=False))
+    r = json.loads(out.read_text(encoding="utf-8"))
+    assert r["bt_failed"] is True and r["attack_changed"] is False and r["text"] == LANG_TEXT["te"]
+    assert totals["failed"] == 1 and "'te': 1" in caplog.text

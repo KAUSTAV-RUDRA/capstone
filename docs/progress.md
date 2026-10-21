@@ -5,6 +5,32 @@ Newest entries at the top.
 
 ---
 
+## 2026-10-21 — Part 25: back-translation attack (NLLB, not IndicTrans2)
+
+`python -m src.data.attack --attack backtranslation` implemented (en->hi->en,
+hi->en->hi, te->en->te; cm not applicable; same capped source rows as
+hybrid/paraphrase; resumable; ids `_bt`; Ollama-VRAM guard on GPU runs).
+
+**IndicTrans2 skipped** (gated + toolkit needs C++ Build Tools on Windows);
+**NLLB used instead** (`facebook/nllb-200-distilled-600M`, now the explicit
+default backend, codes eng_Latn/hin_Deva/tel_Telu). The two ai4bharat repos
+are gated (HF token has no access) and `IndicTransToolkit` fails to build
+without MSVC. `backend: indictrans2` is still wired, with NLLB fallback.
+
+Fixes found on the first CPU test: unbounded NLLB generation looped on a
+repeated token and hallucinated extra text (length_ratio up to 2.6). Now
+capped at ~1.5x input tokens + 10, no_repeat_ngram_size=4,
+repetition_penalty=1.1, plus a per-output script check (>80% of letters in
+the bucket's script; retry greedy; else keep source with `bt_failed=true`).
+`sentencepiece` pinned to 0.2.0 (0.2.2 crashes on import in this venv).
+
+CPU test, 3 machine + 3 human per bucket (18 rows, scratch file): 0 script
+failures, all rows changed, ~30-90 s/row on CPU. Mean length_ratio en 1.07,
+te 0.98, hi 1.56 (up to 2.14): Hindi round trips hallucinate on some rows,
+to be reviewed before T4 uses them.
+
+---
+
 ## 2026-09-24 — Day 5: the webapp is wired to the real pipeline (rubric item 3)
 
 Review-2 sprint Day 5. The Django demo/consultancy layer no longer returns
