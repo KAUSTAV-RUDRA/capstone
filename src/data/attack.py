@@ -645,14 +645,35 @@ class NllbTranslator:
         self.tok.src_lang = src
         enc = self.tok(sentences, truncation=True, max_length=self.max_length, padding="longest",
                        return_tensors="pt").to(self.device)
+        beams = 1 if greedy else self.num_beams
+        # Per-sentence budget (~1.3x that sentence's own tokens + 5): unbounded NLLB generation loops on a
+        # repeated token or hallucinates extra sentences, and a batch-wide budget lets short sentences do it.
+        budgets = (enc["attention_mask"].sum(dim=1).float() * 1.3).long() + 5
+        limit = LengthBudget(budgets.repeat_interleave(beams), self.tok.eos_token_id)
         with torch.inference_mode():
-            # Cap output at ~1.5x the longest input: unbounded NLLB generation loops on a repeated token or
-            # hallucinates extra sentences, which both ruins the attack and burns CPU/GPU time.
             gen = self.model.generate(**enc, forced_bos_token_id=self.tok.convert_tokens_to_ids(tgt),
-                                      num_beams=1 if greedy else self.num_beams,
-                                      max_new_tokens=min(self.max_length, int(1.5 * enc["input_ids"].shape[1]) + 10),
+                                      num_beams=beams, max_new_tokens=min(self.max_length, int(budgets.max())),
+                                      logits_processor=[limit],
                                       no_repeat_ngram_size=4, repetition_penalty=1.1)
         return self.tok.batch_decode(gen, skip_special_tokens=True)
+
+
+class LengthBudget:
+    """Logits processor: once a row has produced its own token budget, only EOS is allowed.
+
+    Rows are batch-major with beams adjacent, so ``budgets`` is repeated per beam.
+    The decoder prompt is the start token, so generated length is ``input_ids.shape[1] - 1``.
+    """
+
+    def __init__(self, budgets: Any, eos_id: int):
+        self.budgets, self.eos_id = budgets, eos_id
+
+    def __call__(self, input_ids: Any, scores: Any) -> Any:
+        over = (input_ids.shape[1] - 1) >= self.budgets.to(scores.device)
+        if over.any():
+            scores[over] = float("-inf")
+            scores[over, self.eos_id] = 0.0
+        return scores
 
 
 def _bt_settings(config: dict[str, Any]) -> dict[str, Any]:
@@ -692,6 +713,8 @@ def _translate_all(translator: Any, sentences: list[str], src: str, tgt: str, ba
 #: bucket -> Unicode name prefix of its script; an output must be mostly this script.
 BT_SCRIPT = {"en": "LATIN", "hi": "DEVANAGARI", "te": "TELUGU"}
 BT_SCRIPT_MIN_SHARE = 0.8
+#: length_ratio outside this range marks a back-translation as suspect (likely hallucination/truncation).
+BT_RATIO_OK = (0.5, 1.6)
 
 
 def script_ok(text: str, bucket: str) -> bool:
@@ -760,10 +783,12 @@ def checked_backtranslation(texts: Sequence[str], bucket: str, translator: Any,
 
 def make_bt_row(row: dict[str, Any], text: str, model_name: str, failed: bool = False) -> dict[str, Any]:
     new = dict(row)
+    ratio = round(len(text.split()) / max(1, len(row["text"].split())), 3)
     new.update(id=attacked_id(row["id"], "backtranslation"), text=text, attack_type="back_translation",
                length_words=len(text.split()), source_id=row["id"], attack_changed=text != row["text"],
-               length_ratio=round(len(text.split()) / max(1, len(row["text"].split())), 3),
-               bt_model=model_name, bt_pivot=BT_ROUTES[row["language"]][1], bt_failed=failed)
+               length_ratio=ratio, bt_model=model_name, bt_pivot=BT_ROUTES[row["language"]][1], bt_failed=failed,
+               # Kept in the file; T4 reports these separately like "attack produced no change" rows.
+               bt_suspect=not BT_RATIO_OK[0] <= ratio <= BT_RATIO_OK[1])
     return new
 
 
@@ -775,7 +800,7 @@ def run_backtranslation(rows: list[dict[str, Any]], out_path: str | Path, config
     scoped = _apply_cap(rows, out_path, seed, "backtranslation", cap)
     na = [r for r in scoped if r["language"] in BT_NOT_APPLICABLE]
     scoped = [r for r in scoped if r["language"] not in BT_NOT_APPLICABLE]
-    totals = {"rows": 0, "skipped": 0, "changed": 0, "failed": 0, "not_applicable": len(na)}
+    totals = {"rows": 0, "skipped": 0, "changed": 0, "failed": 0, "suspect": 0, "not_applicable": len(na)}
     failures: dict[str, int] = defaultdict(int)
     if na:
         log.info("back-translation: attack not applicable to %s (Roman Hinglish cannot go through "
@@ -808,8 +833,9 @@ def run_backtranslation(rows: list[dict[str, Any]], out_path: str | Path, config
         for n in new:
             failures[n["language"]] += n["bt_failed"]
         totals["failed"] = sum(failures.values())
-        log.info("back-translation: %d/%d rows (%.1f s/row); script-check failures so far: %s",
-                 totals["rows"], len(todo), (time.monotonic() - t0) / len(c), dict(failures) or 0)
+        totals["suspect"] += sum(n["bt_suspect"] for n in new)
+        log.info("back-translation: %d/%d rows (%.1f s/row); script-check failures so far: %s; ratio-suspect so far: %d",
+                 totals["rows"], len(todo), (time.monotonic() - t0) / len(c), dict(failures) or 0, totals["suspect"])
     log.info("back-translation: script-check failures per bucket (source kept, bt_failed=true): %s",
              {b: failures.get(b, 0) for b in sorted({r["language"] for r in todo})})
     return totals

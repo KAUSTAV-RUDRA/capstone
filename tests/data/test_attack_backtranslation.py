@@ -164,3 +164,24 @@ def test_failed_after_greedy_keeps_source_and_flags(tmp_path, caplog):
     r = json.loads(out.read_text(encoding="utf-8"))
     assert r["bt_failed"] is True and r["attack_changed"] is False and r["text"] == LANG_TEXT["te"]
     assert totals["failed"] == 1 and "'te': 1" in caplog.text
+
+
+def test_length_budget_forces_eos_per_row():
+    import torch
+    from src.data.attack import LengthBudget
+
+    lb = LengthBudget(torch.tensor([2, 10]), eos_id=2)
+    ids = torch.zeros((2, 4), dtype=torch.long)  # 3 tokens generated after the start token
+    out = lb(ids, torch.zeros((2, 6)))
+    assert out[0, 2] == 0 and torch.isinf(out[0, 0]) and out[0, 0] < 0  # row 0 over budget: only EOS allowed
+    assert (out[1] == 0).all()  # row 1 untouched
+
+
+def test_suspect_flag_on_length_ratio():
+    from src.data.attack import make_bt_row
+
+    row = {"id": "hi_1", "text": "a b c d e f g h i j", "language": "hi"}
+    assert make_bt_row(row, "a b c d e", "m")["bt_suspect"] is False  # 0.5
+    assert make_bt_row(row, "a b c d", "m")["bt_suspect"] is True  # 0.4
+    assert make_bt_row(row, " ".join("x" * 17), "m")["bt_suspect"] is True  # 1.7
+    assert make_bt_row(row, " ".join("x" * 16), "m")["bt_suspect"] is False  # 1.6

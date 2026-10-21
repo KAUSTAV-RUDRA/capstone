@@ -25,9 +25,17 @@ the bucket's script; retry greedy; else keep source with `bt_failed=true`).
 `sentencepiece` pinned to 0.2.0 (0.2.2 crashes on import in this venv).
 
 CPU test, 3 machine + 3 human per bucket (18 rows, scratch file): 0 script
-failures, all rows changed, ~30-90 s/row on CPU. Mean length_ratio en 1.07,
-te 0.98, hi 1.56 (up to 2.14): Hindi round trips hallucinate on some rows,
-to be reviewed before T4 uses them.
+failures, all rows changed, ~30-90 s/row on CPU. First pass: Hindi
+length_ratio up to 2.14 (hallucinated text), because the token budget came
+from the longest sentence in the batch. Fixed with a per-sentence budget
+(~1.3x own tokens + 5, `LengthBudget` logits processor); hi re-run:
+length_ratio 0.92-1.25, 0 suspect, ~36 s/row on CPU. Rows with length_ratio
+outside 0.5-1.6 get `bt_suspect=true` (kept; T4 reports them separately,
+like "attack produced no change" rows).
+
+The 8 failing tests in test_generate / test_loaders / test_schema / 
+test_generate_machine_text (NotImplementedError) are pre-existing: identical
+failures at 76ee3c5. Not fixed.
 
 ---
 
