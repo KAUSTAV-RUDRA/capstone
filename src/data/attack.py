@@ -494,8 +494,56 @@ def hash64(key: str) -> int:
     return int.from_bytes(hashlib.sha256(key.encode("utf-8")).digest()[:4], "big")
 
 
+def processing_order(rows: list[dict[str, Any]], seed: int) -> list[dict[str, Any]]:
+    """Seeded interleaving of buckets/labels used by the slow (LLM / MT) attacks."""
+    return random.Random(seed).sample(rows, len(rows))
+
+
+def cap_per_bucket(order: list[dict[str, Any]], max_machine: int, max_human: int,
+                   done_ids: set[str], attack: str) -> tuple[list[dict[str, Any]], int]:
+    """Keep the first ``max_machine`` machine and ``max_human`` human rows per bucket, in ``order``.
+
+    ``order`` is the seeded processing order, so the kept rows are a random subset
+    of the hybrid source rows and the same subset on every run. Returns the kept
+    rows and the number of already-done rows that fall outside the cap (those stay
+    in the output file but are not in scope).
+    """
+    caps = {LABEL_MACHINE: max_machine, LABEL_HUMAN: max_human}
+    seen: dict[tuple[str, Any], int] = defaultdict(int)
+    kept: list[dict[str, Any]] = []
+    outside = 0
+    for r in order:
+        key = (r["language"], r["label"])
+        if seen[key] < caps.get(r["label"], 0):
+            seen[key] += 1
+            kept.append(r)
+        elif attacked_id(r["id"], attack) in done_ids:
+            outside += 1
+    return kept, outside
+
+
+def _apply_cap(rows: list[dict[str, Any]], out_path: str | Path, seed: int, attack: str,
+               cap: Sequence[int] | None) -> list[dict[str, Any]]:
+    """Order ``rows`` and apply the optional per-bucket cap; log the in-scope total."""
+    order = processing_order(rows, seed)
+    if not cap:
+        return order
+    done = read_done_ids(out_path)
+    kept, outside = cap_per_bucket(order, cap[0], cap[1], done, attack)
+    in_done = sum(attacked_id(r["id"], attack) in done for r in kept)
+    per = defaultdict(int)
+    for r in kept:
+        per[(r["language"], "machine" if r["label"] == LABEL_MACHINE else "human")] += 1
+    log.info("%s cap %d machine + %d human per bucket: in-scope %d rows (%s); %d done in scope, "
+             "%d done outside cap (kept in file, excluded from scope)",
+             attack, cap[0], cap[1], len(kept), ", ".join(f"{k[0]}/{k[1]}={v}" for k, v in sorted(per.items())),
+             in_done, outside)
+    return kept
+
+
 def run_paraphrase(rows: list[dict[str, Any]], out_path: str | Path, config: dict[str, Any],
-                   seed: int, max_minutes: float, parallel: int | None = None):
+                   seed: int, max_minutes: float, parallel: int | None = None,
+                   cap: Sequence[int] | None = None):
     """Paraphrase ``rows`` with Qwen2.5-7B-Instruct (4-bit, local Ollama); resumable and time-boxed."""
     from src.data.generate import OllamaClient, describe_ollama_model, load_fertility, load_with_fallback
     from src.utils.resumable import run_concurrent
@@ -520,7 +568,7 @@ def run_paraphrase(rows: list[dict[str, Any]], out_path: str | Path, config: dic
                                     temperature=float(dec.get("temperature", 0.8)),
                                     top_p=float(dec.get("top_p", 0.95)), seed=seed)
     # Interleave buckets/labels so a time-boxed run covers every cell evenly instead of one bucket first.
-    order = random.Random(seed).sample(rows, len(rows))
+    order = _apply_cap(rows, out_path, seed, "paraphrase", cap)
     return run_concurrent(order, id_of=lambda r: attacked_id(r["id"], "paraphrase"), process_item=worker,
                           out_path=out_path, workers=workers, max_minutes=max_minutes, label="paraphrases")
 
@@ -542,6 +590,9 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--out", default=DEFAULT_ATTACKED)
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
     parser.add_argument("--seed", type=int, default=None, help="default: corpus.seed from the config")
+    parser.add_argument("--max-per-bucket", type=int, nargs=2, metavar=("MACHINE", "HUMAN"), default=None,
+                        help="paraphrase/backtranslation only: attack the first MACHINE machine + HUMAN human "
+                             "rows per bucket in the seeded processing order (a subset of the hybrid sources)")
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args(argv)
 
@@ -564,7 +615,7 @@ def main(argv: list[str] | None = None) -> None:
         return
     if args.attack == "paraphrase":
         rows = select_rows(Path(args.corpus), config, seed)  # same seed => same sources as hybrid
-        report = run_paraphrase(rows, args.out, config, seed, args.max_minutes)
+        report = run_paraphrase(rows, args.out, config, seed, args.max_minutes, cap=args.max_per_bucket)
         log.info("paraphrase: %s", report.summary())
         return
     raise NotImplementedError(f"the '{args.attack}' attack lands in {part}.")
