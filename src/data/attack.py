@@ -15,7 +15,7 @@ RAID/DetectRL practice:
 ``paraphrase``  (implemented, Part 24)
     Qwen2.5-7B-Instruct 4-bit: "Rewrite in your own words, same language, same
     length".
-``backtranslation``  (stub, Part 25)
+``backtranslation``  (Part 25; en, hi, te only - cm not applicable)
     IndicTrans2 en<->indic: en->hi->en, hi->en->hi, te->en->te; for cm,
     Devanagari-normalise via indic-nlp-library, hi->en->hi, then re-romanise.
 
@@ -41,6 +41,7 @@ import re
 import sys
 from collections import defaultdict
 from collections.abc import Sequence
+from itertools import zip_longest
 from pathlib import Path
 from typing import Any
 
@@ -573,11 +574,191 @@ def run_paraphrase(rows: list[dict[str, Any]], out_path: str | Path, config: dic
                           out_path=out_path, workers=workers, max_minutes=max_minutes, label="paraphrases")
 
 
-def apply_backtranslation(texts: Sequence[str], buckets: Sequence[str], config: dict[str, Any]) -> list[str]:
-    """Round-trip each text through IndicTrans2 and back into its own language."""
-    # TODO(stage-6 part-25): en->hi->en, hi->en->hi, te->en->te; cm via
-    # Devanagari normalisation, hi->en->hi, then re-romanisation.
-    raise NotImplementedError("apply_backtranslation lands in parts-plan Part 25")
+# --- back-translation attack ---------------------------------------------------
+#: bucket -> (own-language FLORES code, pivot code). en goes through Hindi, hi/te through English.
+BT_ROUTES: dict[str, tuple[str, str]] = {
+    "en": ("eng_Latn", "hin_Deva"),
+    "hi": ("hin_Deva", "eng_Latn"),
+    "te": ("tel_Telu", "eng_Latn"),
+}
+#: IndicTrans2 cannot take Roman-script Hinglish, so cm is not attacked (reported, not forced).
+BT_NOT_APPLICABLE = ("cm",)
+BT_DEFAULTS = {
+    "indictrans2": {"en_indic": "ai4bharat/indictrans2-en-indic-dist-200M",
+                    "indic_en": "ai4bharat/indictrans2-indic-en-dist-200M"},
+    "nllb": "facebook/nllb-200-distilled-600M",
+    "sentence_batch": 16, "row_chunk": 8, "num_beams": 4, "max_length": 256,
+}
+
+
+class IndicTrans2Translator:
+    """Distilled IndicTrans2 pair (en->indic, indic->en); needs trust_remote_code + IndicTransToolkit."""
+
+    name = "indictrans2-dist-200M"
+
+    def __init__(self, en_indic: str, indic_en: str, device: str, num_beams: int, max_length: int):
+        import torch
+        from IndicTransToolkit import IndicProcessor  # ImportError => caller falls back to NLLB
+        from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+
+        self.device, self.num_beams, self.max_length = device, num_beams, max_length
+        self.processor = IndicProcessor(inference=True)
+        dtype = torch.float16 if device == "cuda" else torch.float32
+        self.parts = {}
+        for key, repo in (("en_indic", en_indic), ("indic_en", indic_en)):
+            tok = AutoTokenizer.from_pretrained(repo, trust_remote_code=True)
+            model = AutoModelForSeq2SeqLM.from_pretrained(repo, trust_remote_code=True, torch_dtype=dtype)
+            self.parts[key] = (tok, model.to(device).eval())
+
+    def translate(self, sentences: list[str], src: str, tgt: str) -> list[str]:
+        import torch
+
+        tok, model = self.parts["en_indic" if src == "eng_Latn" else "indic_en"]
+        batch = self.processor.preprocess_batch(sentences, src_lang=src, tgt_lang=tgt)
+        enc = tok(batch, truncation=True, max_length=self.max_length, padding="longest",
+                  return_tensors="pt").to(self.device)
+        with torch.inference_mode():
+            gen = model.generate(**enc, num_beams=self.num_beams, num_return_sequences=1,
+                                 max_length=self.max_length, use_cache=False)
+        dec = tok.batch_decode(gen, skip_special_tokens=True, clean_up_tokenization_spaces=True)
+        return self.processor.postprocess_batch(dec, lang=tgt)
+
+
+class NllbTranslator:
+    """facebook/nllb-200-distilled-600M fallback; uses the same FLORES language codes."""
+
+    name = "nllb-200-distilled-600M"
+
+    def __init__(self, repo: str, device: str, num_beams: int, max_length: int):
+        import torch
+        from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+
+        self.device, self.num_beams, self.max_length = device, num_beams, max_length
+        self.tok = AutoTokenizer.from_pretrained(repo)
+        dtype = torch.float16 if device == "cuda" else torch.float32
+        self.model = AutoModelForSeq2SeqLM.from_pretrained(repo, torch_dtype=dtype).to(device).eval()
+
+    def translate(self, sentences: list[str], src: str, tgt: str) -> list[str]:
+        import torch
+
+        self.tok.src_lang = src
+        enc = self.tok(sentences, truncation=True, max_length=self.max_length, padding="longest",
+                       return_tensors="pt").to(self.device)
+        with torch.inference_mode():
+            gen = self.model.generate(**enc, forced_bos_token_id=self.tok.convert_tokens_to_ids(tgt),
+                                      num_beams=self.num_beams, max_length=self.max_length)
+        return self.tok.batch_decode(gen, skip_special_tokens=True)
+
+
+def _bt_settings(config: dict[str, Any]) -> dict[str, Any]:
+    return {**BT_DEFAULTS, **((config.get("attack") or {}).get("backtranslation") or {})}
+
+
+def load_translator(config: dict[str, Any], device: str):
+    """IndicTrans2 distilled if it loads, else NLLB-200-distilled-600M; logs which one is used."""
+    bt = _bt_settings(config)
+    try:
+        tr = IndicTrans2Translator(bt["indictrans2"]["en_indic"], bt["indictrans2"]["indic_en"], device,
+                                   int(bt["num_beams"]), int(bt["max_length"]))
+    except Exception as exc:  # noqa: BLE001 - gated repo, offline, missing toolkit, remote-code breakage
+        log.warning("IndicTrans2 unavailable (%s: %s); falling back to %s", type(exc).__name__, exc, bt["nllb"])
+        tr = NllbTranslator(bt["nllb"], device, int(bt["num_beams"]), int(bt["max_length"]))
+    log.info("back-translation model: %s on %s", tr.name, device)
+    return tr
+
+
+def _translate_all(translator: Any, sentences: list[str], src: str, tgt: str, batch: int) -> list[str]:
+    """Translate in length-sorted batches (less padding); returns results in input order."""
+    order = sorted(range(len(sentences)), key=lambda i: len(sentences[i]))
+    out = [""] * len(sentences)
+    for start in range(0, len(order), batch):
+        idx = order[start:start + batch]
+        for i, t in zip(idx, translator.translate([sentences[i] for i in idx], src, tgt)):
+            out[i] = t
+    return out
+
+
+def backtranslate(texts: Sequence[str], bucket: str, translator: Any, batch: int = 16) -> list[str]:
+    """Round-trip texts through the pivot language and back, sentence by sentence.
+
+    Separators (paragraph breaks) are kept as in the source; a sentence whose
+    translation comes back empty keeps its original wording.
+    """
+    if bucket not in BT_ROUTES:
+        raise ValueError(f"back-translation is not applicable to bucket '{bucket}'")
+    own, pivot = BT_ROUTES[bucket]
+    split = [split_sentences(t) for t in texts]
+    flat = [s for sents, _ in split for s in sents if s.strip()]
+    back = _translate_all(translator, _translate_all(translator, flat, own, pivot, batch), pivot, own, batch)
+    it = iter(back)
+    out = []
+    for sents, seps in split:
+        pieces = []
+        for s, sep in zip(sents, seps):
+            pieces.append(((next(it).strip() or s) if s.strip() else s) + sep)
+        out.append("".join(pieces))
+    return out
+
+
+def ollama_vram_models(host: str = "http://127.0.0.1:11434") -> list[str]:
+    """Names of Ollama models currently resident in VRAM ([] if Ollama is not running)."""
+    import json
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(f"{host}/api/ps", timeout=3) as resp:
+            models = json.load(resp).get("models", [])
+    except Exception:  # noqa: BLE001 - not running / unreachable => holds nothing
+        return []
+    return [m.get("name", "?") for m in models if int(m.get("size_vram", 0)) > 0]
+
+
+def make_bt_row(row: dict[str, Any], text: str, model_name: str) -> dict[str, Any]:
+    new = dict(row)
+    new.update(id=attacked_id(row["id"], "backtranslation"), text=text, attack_type="back_translation",
+               length_words=len(text.split()), source_id=row["id"], attack_changed=text != row["text"],
+               length_ratio=round(len(text.split()) / max(1, len(row["text"].split())), 3),
+               bt_model=model_name, bt_pivot=BT_ROUTES[row["language"]][1])
+    return new
+
+
+def run_backtranslation(rows: list[dict[str, Any]], out_path: str | Path, config: dict[str, Any], seed: int,
+                        max_minutes: float, device: str = "cpu", cap: Sequence[int] | None = None,
+                        translator: Any = None) -> dict[str, int]:
+    """Back-translate the capped source rows (en/hi/te); resumable, time-boxed, appended per chunk."""
+    bt = _bt_settings(config)
+    scoped = _apply_cap(rows, out_path, seed, "backtranslation", cap)
+    na = [r for r in scoped if r["language"] in BT_NOT_APPLICABLE]
+    scoped = [r for r in scoped if r["language"] not in BT_NOT_APPLICABLE]
+    totals = {"rows": 0, "skipped": 0, "changed": 0, "not_applicable": len(na)}
+    if na:
+        log.info("back-translation: attack not applicable to %s (Roman Hinglish cannot go through "
+                 "IndicTrans2); %d source rows excluded - T4 reports cm as n/a for this attack",
+                 "/".join(BT_NOT_APPLICABLE), len(na))
+    done = read_done_ids(out_path)
+    todo = [r for r in scoped if attacked_id(r["id"], "backtranslation") not in done]
+    totals["skipped"] = len(scoped) - len(todo)
+    if not todo:
+        return totals
+    translator = translator or load_translator(config, device)
+    chunk = int(bt["row_chunk"])
+    groups = []
+    for bucket in sorted({r["language"] for r in todo}):
+        rs = [r for r in todo if r["language"] == bucket]
+        groups.append([rs[i:i + chunk] for i in range(0, len(rs), chunk)])
+    chunks = [c for tier in zip_longest(*groups) for c in tier if c]  # interleave buckets
+    deadline = time.monotonic() + max_minutes * 60 if max_minutes else None
+    for c in chunks:
+        if deadline and time.monotonic() > deadline:
+            log.info("back-translation: time budget reached; resume with the same command")
+            break
+        outs = backtranslate([r["text"] for r in c], c[0]["language"], translator, int(bt["sentence_batch"]))
+        new = [make_bt_row(r, t, translator.name) for r, t in zip(c, outs)]
+        append_rows(new, out_path)
+        totals["rows"] += len(new)
+        totals["changed"] += sum(n["attack_changed"] for n in new)
+        log.info("back-translation: %d/%d rows", totals["rows"], len(todo))
+    return totals
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -593,6 +774,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--max-per-bucket", type=int, nargs=2, metavar=("MACHINE", "HUMAN"), default=None,
                         help="paraphrase/backtranslation only: attack the first MACHINE machine + HUMAN human "
                              "rows per bucket in the seeded processing order (a subset of the hybrid sources)")
+    parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"],
+                        help="back-translation device; auto = cuda if available")
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args(argv)
 
@@ -617,6 +800,21 @@ def main(argv: list[str] | None = None) -> None:
         rows = select_rows(Path(args.corpus), config, seed)  # same seed => same sources as hybrid
         report = run_paraphrase(rows, args.out, config, seed, args.max_minutes, cap=args.max_per_bucket)
         log.info("paraphrase: %s", report.summary())
+        return
+    if args.attack == "backtranslation":
+        device = args.device
+        if device == "auto":
+            import torch
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        if device == "cuda":  # a resident Ollama model would starve the translator of VRAM
+            held = ollama_vram_models()
+            if held:
+                sys.exit(f"Ollama is holding VRAM ({', '.join(held)}). Free it first: "
+                         + "; ".join(f"ollama stop {m}" for m in held))
+        rows = select_rows(Path(args.corpus), config, seed)  # same seed => same sources as hybrid
+        totals = run_backtranslation(rows, args.out, config, seed, args.max_minutes, device,
+                                     args.max_per_bucket)
+        log.info("backtranslation: %s", totals)
         return
     raise NotImplementedError(f"the '{args.attack}' attack lands in {part}.")
 
