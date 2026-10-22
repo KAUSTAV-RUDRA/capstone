@@ -104,7 +104,7 @@ def main() -> None:
         "generates hi only, so en, te and cm have no held-out evaluation at all, and T1's seen-generator numbers "
         "there are same-generator numbers (non-negotiable #4). **Missing baselines:** the supervised XLM-R baseline "
         "was never built, and vanilla DetectGPT was dropped for Fast-DetectGPT (decisions.md 2026-09-18), so T1 has "
-        "three zero-shot baselines, not five. **T4 (adversarial)** is not part of this rebuild. The test split's hi "
+        "three zero-shot baselines, not five. **T4 (adversarial)** is in T4_adversarial.md/.csv: the frozen detector applied to attacked rows, never refit. The test split's hi "
         "bucket mixes seen and llama machine rows; T1 gives both breakdowns.\n"
     )
     P.append(

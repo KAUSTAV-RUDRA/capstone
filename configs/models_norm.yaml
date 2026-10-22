@@ -148,3 +148,8 @@ text_normalisation: whitespace
 # results/calibration.json).
 pipeline:
   scores_path: results/norm/scores.parquet
+  # Attacked rows (data/processed/attacked.jsonl) scored with the same heads, one parquet
+  # per scoring run (headA on CPU, headB on GPU). Read by experiments/exp06_adversarial.py.
+  attacked_scores:
+    - results/norm/attacked_scores_a.parquet
+    - results/norm/attacked_scores_gpu.parquet

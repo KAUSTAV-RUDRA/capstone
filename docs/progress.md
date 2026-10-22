@@ -5,6 +5,21 @@ Newest entries at the top.
 
 ---
 
+## 2026-10-22 — T4: attacked rows rescored, frozen detector applied
+
+Scored all 4,239 attacked rows (hybrid 1,857 / paraphrase 1,357 / back-translation
+1,025) with headA (CPU, ~28 min) and headB/headB_word (GPU, ~6 min) under
+`configs/models_norm.yaml`, into `results/norm/attacked_scores_a.parquet` and
+`attacked_scores_gpu.parquet` (listed in the config's `pipeline.attacked_scores`).
+Nothing refit: Head A's saved model is byte-identical after the run, its clean
+scores reproduce exactly, and `experiments/exp06_adversarial.py` asserts the
+conformal taus equal `conformal_thresholds.csv` and that the frozen fuser
+reproduces the stored clean fused scores. T1/T2 untouched (built from corpus.jsonl,
+which has no attack rows).
+
+`python -m experiments.exp06_adversarial --config configs/models_norm.yaml` writes
+`docs/results/T4_adversarial.{csv,md}` (+ `results/exp06_adversarial.csv`).
+
 ## 2026-10-21 — Part 25: back-translation attack (NLLB, not IndicTrans2)
 
 `python -m src.data.attack --attack backtranslation` implemented (en->hi->en,
