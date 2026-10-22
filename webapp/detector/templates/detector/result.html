@@ -10,7 +10,11 @@
       <div class="card-body text-center">
         <div class="text-uppercase text-muted small">Verdict</div>
         <div class="display-5 fw-bold my-2">{{ decision.verdict }}</div>
+        {% if decision.verdict == "ABSTAIN" %}
+        <div class="fs-5">Not enough evidence to decide - refer to a human reviewer</div>
+        {% else %}
         <div class="fs-5">Confidence: {{ decision.confidence|floatformat:3 }}</div>
+        {% endif %}
         {% if decision.explanation.reason %}<div class="small mt-1">Reason: {{ decision.explanation.reason }}</div>{% endif %}
         <div class="text-muted small">Decision support for a human reviewer, not an accusation.</div>
         <div class="text-muted small mt-2">

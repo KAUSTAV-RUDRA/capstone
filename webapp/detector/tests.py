@@ -56,6 +56,26 @@ class AnalyseFlowTests(TestCase):
         resp = self.client.get(reverse("detector:result", args=[submission.id]))
         self.assertEqual(resp.status_code, 200)
         self.assertContains(resp, "HUMAN")
+        self.assertContains(resp, "Confidence:")
+
+    @patch("webapp.detector.services.analyse_text")
+    def test_abstain_page_hides_confidence_and_shows_reason(self, mock_analyse) -> None:
+        result = _fake_result("ABSTAIN")
+        result["explanation"] = {**result["explanation"], "reason": "too short to confirm as human"}
+        mock_analyse.return_value = result
+        self.client.post(reverse("detector:analyse"), {"text": "some text here", "language": "auto"})
+        resp = self.client.get(reverse("detector:result", args=[Submission.objects.get().id]))
+        self.assertContains(resp, "Not enough evidence to decide - refer to a human reviewer")
+        self.assertContains(resp, "too short to confirm as human")
+        self.assertNotContains(resp, "Confidence:")
+
+    @patch("webapp.detector.services.analyse_text")
+    def test_abstain_without_reason_shows_no_reason_line(self, mock_analyse) -> None:
+        mock_analyse.return_value = _fake_result("ABSTAIN")
+        self.client.post(reverse("detector:analyse"), {"text": "some text here", "language": "auto"})
+        resp = self.client.get(reverse("detector:result", args=[Submission.objects.get().id]))
+        self.assertContains(resp, "Not enough evidence to decide")
+        self.assertNotContains(resp, "Reason:")
 
 
 class DashboardAggregationTests(TestCase):
