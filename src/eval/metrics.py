@@ -115,3 +115,14 @@ def compute_metrics(
     if bucket is not None:
         row["bucket"] = bucket
     return row
+
+
+def wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
+    """Wilson score interval (default 95%) for ``k`` successes in ``n`` trials; NaNs when n == 0."""
+    if n == 0:
+        return float("nan"), float("nan")
+    p = k / n
+    d = 1 + z * z / n
+    c = (p + z * z / (2 * n)) / d
+    h = z * np.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / d
+    return float(c - h), float(c + h)

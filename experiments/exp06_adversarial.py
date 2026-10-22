@@ -67,6 +67,14 @@ def _rate(mask) -> float:
     return float(mask.mean()) if len(mask) else float("nan")
 
 
+def _put(out: dict, key: str, mask) -> None:
+    """``out[key]`` = rate of ``mask``, ``out[key_lo/_hi]`` = its 95% Wilson interval."""
+    from src.eval.metrics import wilson
+
+    out[key] = _rate(mask)
+    out[f"{key}_lo"], out[f"{key}_hi"] = wilson(int(mask.sum()), len(mask))
+
+
 def load_frozen(config_path: str):
     """Fuser, temperature, conformal taus and HUMAN cutoffs, loaded from disk without fitting."""
     import numpy as np
@@ -138,13 +146,13 @@ def evaluate(group: "pd.DataFrame", a, bucket: str, rng) -> dict[str, Any]:
     for alpha, tag in ((0.05, "a05"), (0.01, "a01")):
         tau = a.conformal[alpha].threshold(bucket)
         flag, clear = p > tau, p < lower
-        out[f"det_{tag}"] = _rate(flag[mac])
-        out[f"ff_{tag}"] = _rate(flag[hum])
         abstain = ~flag & ~clear
-        out[f"abstain_{tag}"] = _rate(abstain)
-        out[f"abstain_human_{tag}"] = _rate(abstain[hum])
-        out[f"abstain_machine_{tag}"] = _rate(abstain[mac])
-        out[f"false_clear_{tag}"] = _rate(clear[mac])
+        _put(out, f"det_{tag}", flag[mac])
+        _put(out, f"ff_{tag}", flag[hum])
+        _put(out, f"abstain_{tag}", abstain)
+        _put(out, f"abstain_human_{tag}", abstain[hum])
+        _put(out, f"abstain_machine_{tag}", abstain[mac])
+        _put(out, f"false_clear_{tag}", clear[mac])
     if "length_ratio" in group:
         out["mean_length_ratio"] = float(np.nanmean(group["length_ratio"].to_numpy(dtype=float))) \
             if len(group) else float("nan")
@@ -212,6 +220,8 @@ def run(config_path: str) -> "pd.DataFrame":
                 add(bucket, attack, "bt_failed=true", sub[sub["bt_failed"] == True])  # noqa: E712
 
     df = pd.DataFrame(rows)
+    for c in ("n_human", "n_machine"):
+        df[c] = df[c].astype("Int64")
     write_csv(df, RESULTS_CSV)
     write_csv(df, DOCS_CSV)
     with open(DOCS_MD, "w", encoding="utf-8") as fh:
@@ -234,32 +244,36 @@ def render_markdown(df: "pd.DataFrame", a) -> str:
              "--config configs/models_norm.yaml`. Source: `T4_adversarial.csv`.", "",
              "Columns: AUROC (95% CI); det = machine rows flagged MACHINE at alpha 0.05 / 0.01; "
              "ff = human rows flagged MACHINE (false-flag) at alpha 0.05 / 0.01; "
-             "abstain and false-clear (machine called HUMAN) are for the three-way gate at alpha 0.01 "
-             "(shipped) and 0.05; len = mean attacked/source word-count ratio. "
+             "abstain and false-clear (machine called HUMAN) are for the shipped three-way gate (alpha 0.01; the CSV also has 0.05); "
+             "[lo, hi] = 95% Wilson interval in percent; len = mean attacked/source word-count ratio. "
              "AUROC needs >= 30 rows per class, else n/a.", ""]
     head = ("| bucket | attack | slice | n h/m | AUROC [95% CI] | clean-matched AUROC | det 5% | det 1% | ff 5% | ff 1% "
-            "| abstain 1% | abstain 5% | false-clear 1% | false-clear 5% | len |")
-    sep = "|" + " --- |" * 15
-    lines += [head, sep]
+            "| abstain 1% | false-clear 1% | len |")
+    lines += [head, "|" + " --- |" * 13]
+
+    def cell(r, key):
+        if r[key] != r[key]:
+            return "n/a"
+        return f"{r[key] * 100:.1f}% [{r[key + '_lo'] * 100:.0f}, {r[key + '_hi'] * 100:.0f}]"
+
     for _, r in df.iterrows():
         if isinstance(r.get("note"), str) and r["note"].startswith("n/a"):
-            lines.append(f"| {r['bucket']} | {r['attack']} | {r['slice']} | | {r['note']} |" + " |" * 10)
+            lines.append(f"| {r['bucket']} | {r['attack']} | {r['slice']} | | {r['note']} |" + " |" * 8)
             continue
         ci = f"{_fmt(r['auroc'])} [{_fmt(r['auroc_lo'])}, {_fmt(r['auroc_hi'])}]" if r["auroc"] == r["auroc"] else "n/a"
         lines.append(
-            f"| {r['bucket']} | {r['attack']} | {r['slice']} | {r['n_human']}/{r['n_machine']} | {ci} | "
-            f"{_fmt(r['clean_matched_auroc'])} | {_fmt(r['det_a05'], True)} | {_fmt(r['det_a01'], True)} | "
-            f"{_fmt(r['ff_a05'], True)} | {_fmt(r['ff_a01'], True)} | {_fmt(r['abstain_a01'], True)} | "
-            f"{_fmt(r['abstain_a05'], True)} | {_fmt(r['false_clear_a01'], True)} | {_fmt(r['false_clear_a05'], True)} | "
-            f"{_fmt(r['mean_length_ratio'], nd=2)} |")
+            f"| {r['bucket']} | {r['attack']} | {r['slice']} | {int(r['n_human'])}/{int(r['n_machine'])} | {ci} | "
+            f"{_fmt(r['clean_matched_auroc'])} | " + " | ".join(cell(r, k) for k in
+            ("det_a05", "det_a01", "ff_a05", "ff_a01", "abstain_a01", "false_clear_a01"))
+            + f" | {_fmt(r['mean_length_ratio'], nd=2)} |")
     lines += ["", "## Heads alone vs fused (AUROC, all rows of each attack)", "",
               "| bucket | attack | headA | headB | fused |", "| --- | --- | --- | --- | --- |"]
     main = df[(df["slice"].isin(["all test", "all"])) & df["auroc"].notna()]
     for _, r in main.iterrows():
         lines.append(f"| {r['bucket']} | {r['attack']} | {_fmt(r['auroc_headA'])} | {_fmt(r['auroc_headB'])} | {_fmt(r['auroc'])} |")
     lines += ["", "## Caveats", "",
-              "- Rates (det, ff, abstain, false-clear) carry no CI; with 100-150 human rows per cell a false-flag "
-              "rate has a 95% half-width of roughly 4-10 points. Only AUROC is bootstrapped.",
+              "- AUROC intervals are stratified bootstrap (1000 resamples); rates use Wilson intervals, which treat "
+              "rows as independent (several attacked rows can share a prompt).",
               "- Under `paraphrase` and `back_translation` the label-0 rows are human text that an LLM / MT model "
               "then rewrote. Their `ff` is a false flag against the original author, but the text is no longer "
               "purely human-written.",
