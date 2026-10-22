@@ -5,6 +5,17 @@ Newest entries at the top.
 
 ---
 
+## 2026-10-22 — v1.0 close-out: deployment rule, tests, README
+
+Webapp runs the final frozen pipeline (Head A + Head B, fusion, per-language temperature,
+conformal gate) at alpha 0.05 by default (`DETECTOR_ALPHA=0.01` for the strict level).
+Deployment-only rule in `webapp/detector/services.py`: cm text under 50 words with a HUMAN
+verdict becomes ABSTAIN, reason "too short to confirm as human"; MACHINE untouched; no results
+table changed. Tests: 16 failing -> 0 (162 passed, 7 skipped in pytest; 13 in manage.py test).
+Seven scaffold stubs skipped with reasons, four implemented (config, io, logging, fast-detectgpt
+contract), and five `test_generate*` tests updated to the current config (phi dropped, llama
+the sole held-out generator, mistral and llama exclusions). README rewritten.
+
 ## 2026-10-22 — T4: attacked rows rescored, frozen detector applied
 
 Scored all 4,239 attacked rows (hybrid 1,857 / paraphrase 1,357 / back-translation

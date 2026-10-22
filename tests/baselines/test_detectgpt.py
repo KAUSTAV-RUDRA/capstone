@@ -1,8 +1,12 @@
-"""Tests for src.baselines.detectgpt (scaffold stub). Serves Phase 2 §2.2.1."""
+"""Tests for src.baselines.detectgpt.
+
+Skipped: vanilla DetectGPT was dropped for Fast-DetectGPT (decisions.md 2026-09-18); src/baselines/detectgpt.py is an unimplemented, unregistered stub.
+"""
 from __future__ import annotations
 
+import pytest
 
+
+@pytest.mark.skip(reason='vanilla DetectGPT was dropped for Fast-DetectGPT (decisions.md 2026-09-18); src/baselines/detectgpt.py is an unimplemented, unregistered stub.')
 def test_score_contract() -> None:
-    """Placeholder: score(texts) returns a 1-D np.ndarray of len(texts)."""
-    # TODO(phase-2 step-2.2.1): test DetectGPT baseline score contract.
     raise NotImplementedError

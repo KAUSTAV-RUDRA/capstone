@@ -10,6 +10,8 @@ import json
 import tempfile
 from pathlib import Path
 
+import pytest
+
 from src.data import generate
 from src.utils import modelload, resumable
 from src.utils.config import load_config
@@ -17,7 +19,7 @@ from src.utils.config import load_config
 DATA_CONFIG = Path(__file__).resolve().parents[2] / "configs" / "data.yaml"
 IDS = [f"en-{i:05d}" for i in range(3000)]
 SEEN = ["qwen7b", "gemma", "mistral"]
-HELDOUT = ["llama", "phi"]
+HELDOUT = ["llama"]   # phi dropped entirely 2026-09-28 (decisions.md); llama is the sole held-out generator
 
 
 def test_generator_slug_is_filesystem_safe() -> None:
@@ -110,24 +112,28 @@ def test_seen_assignment_is_sha256_mod_3_and_gives_each_passage_one_generator() 
     assert all(sum(keep(i) for keep in keeps) == 1 for i in IDS)
 
 
-def test_heldout_generators_take_disjoint_30_percent_slices_independent_of_seen() -> None:
+def test_heldout_generator_takes_30_percent_slice_independent_of_seen() -> None:
     generators = load_config(DATA_CONFIG)["machine_corpus"]["generators"]
     llama = generate.make_assignment("llama", generators, 0.30)
-    phi = generate.make_assignment("phi", generators, 0.30)
-    assert not any(llama(i) and phi(i) for i in IDS)                  # disjoint
-    for keep in (llama, phi):
-        share = sum(map(keep, IDS)) / len(IDS)
-        assert 0.27 < share < 0.33, share
+    share = sum(map(llama, IDS)) / len(IDS)
+    assert 0.27 < share < 0.33, share
     llama_ids = [i for i in IDS if llama(i)]
     for alias in SEEN:                                               # independent second hash
-        share = sum(generate.seen_generator_for(i, SEEN) == alias for i in llama_ids) / len(llama_ids)
-        assert 0.27 < share < 0.40, (alias, share)
-    try:
-        generate.heldout_generator_for("x", HELDOUT, 0.6)
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("2 x 60 % must be rejected")
+        seen_share = sum(generate.seen_generator_for(i, SEEN) == alias for i in llama_ids) / len(llama_ids)
+        assert 0.27 < seen_share < 0.40, (alias, seen_share)
+    with pytest.raises(KeyError):                                    # phi is no longer a generator
+        generate.make_assignment("phi", generators, 0.30)
+
+
+def test_two_heldout_generators_would_take_disjoint_slices() -> None:
+    """The slicing function still supports several held-out generators (pure function, no config)."""
+    two = ["llama", "phi"]
+    picks = [generate.heldout_generator_for(i, two, 0.30) for i in IDS]
+    for alias in two:
+        assert 0.27 < picks.count(alias) / len(IDS) < 0.33
+    assert all(p in (None, "llama", "phi") for p in picks)           # one passage, at most one held-out generator
+    with pytest.raises(ValueError):
+        generate.heldout_generator_for("x", two, 0.6)                # 2 x 60 % must be rejected
 
 
 def test_load_prompts_keeps_only_assigned_passages() -> None:
@@ -280,18 +286,18 @@ def test_bucket_exclusions_by_role_and_by_generator() -> None:
     assert generate.excluded_buckets("gemma", "seen", (), {}) == {}
 
 
-def test_config_excludes_te_for_mistral_only() -> None:
+def test_config_excludes_te_and_cm_for_mistral_and_llama() -> None:
     mc = load_config(DATA_CONFIG)["machine_corpus"]
     by_generator = mc["drop_buckets_by_generator"]
-    assert by_generator == {"mistral": ["te"]}
+    assert by_generator == {"mistral": ["te", "cm"], "llama": ["cm", "te"]}
     role = {a: s["role"] for a, s in mc["generators"].items()}
     kept = {a: [b for b in ["en", "hi", "te", "cm"]
                 if b not in generate.excluded_buckets(a, role[a], mc["heldout_drop_buckets"], by_generator)]
             for a in mc["generators"]}
-    assert kept["mistral"] == ["en", "hi", "cm"], "mistral covers en/hi/cm, never te"
+    assert kept["mistral"] == ["en", "hi"], "mistral covers en/hi only (te and cm dropped, decisions.md)"
     assert kept["qwen7b"] == ["en", "hi", "te", "cm"]
     assert kept["gemma"] == ["en", "hi", "te", "cm"]
-    assert kept["llama"] == kept["phi"] == ["hi", "te", "cm"]
+    assert kept["llama"] == ["hi"], "llama (held-out, no en) generates hi only"
     # te is still covered by two seen generators: qwen 400 + gemma 200 = 600.
     te_caps = {a: {**mc["bucket_limits"], **(mc["bucket_limits_by_generator"].get(a) or {})}["te"]
                for a in ["qwen7b", "gemma"]}
@@ -300,7 +306,7 @@ def test_config_excludes_te_for_mistral_only() -> None:
     assert "te" not in mc["budget"]["compliance_ratio_by_generator"]["mistral"]
 
 
-def test_heldout_generators_drop_en_and_seen_ones_do_not() -> None:
+def test_heldout_generator_drops_en_and_seen_ones_do_not() -> None:
     mc = load_config(DATA_CONFIG)["machine_corpus"]
     drop = set(mc["heldout_drop_buckets"])
     assert drop == {"en"}

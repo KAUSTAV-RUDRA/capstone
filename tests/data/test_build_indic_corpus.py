@@ -1,8 +1,12 @@
-"""Tests for src.data.build_indic_corpus (scaffold stub). Serves Phase 2 §2.1.2."""
+"""Tests for src.data.build_indic_corpus.
+
+Skipped: src/data/build_indic_corpus.py is an unimplemented stub; the corpus is built by build_human_corpus + generate + freeze_splits, whose length matching is tested in tests/data/test_freeze_splits.py.
+"""
 from __future__ import annotations
 
+import pytest
 
+
+@pytest.mark.skip(reason='src/data/build_indic_corpus.py is an unimplemented stub; the corpus is built by build_human_corpus + generate + freeze_splits, whose length matching is tested in tests/data/test_freeze_splits.py.')
 def test_length_matched_per_bucket() -> None:
-    """Placeholder: human vs machine length distributions match per bucket (KS p>0.05)."""
-    # TODO(phase-2 step-2.1.2): test prompt/length matching.
     raise NotImplementedError

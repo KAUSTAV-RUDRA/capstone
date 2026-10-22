@@ -60,6 +60,18 @@ CALIBRATION_PATH = Path("results/calibration.json")
 HEAD_A_DEFAULT_PATH = "results/norm/models/headA.joblib"
 FUSER_AB_DEFAULT_PATH = "results/models/fuser_ab.joblib"
 
+#: Conformal level of the MACHINE cutoff. 0.05 is the v1.0 operating point (FPR bound 5% per
+#: language; docs/results/alpha_operating_points.md). 0.01 is the stricter alternative.
+#: Override with DETECTOR_ALPHA=0.01.
+ALPHA_KEYS = {0.05: "tau_alpha_0.05", 0.01: "tau_machine"}
+DEFAULT_ALPHA = 0.05
+
+#: Deployment rule (not a research result; no results table depends on it): cm texts shorter
+#: than this many whitespace-separated words that the gate would call HUMAN become ABSTAIN.
+#: MACHINE verdicts are never changed. T7 shows cm false clears are all < 50 words.
+CM_SHORT_WORDS = 50
+CM_SHORT_REASON = "too short to confirm as human"
+
 #: Loaded once per process, on first use. Never cleared during the process's life.
 _cache: dict[str, Any] = {}
 
@@ -141,19 +153,34 @@ def _get_fuser() -> Fuser:
     return _cache["fuser"]
 
 
-def _get_abstention_gate(bucket: str) -> AbstentionGate:
+def get_alpha() -> float:
+    """The conformal level in force: ``DETECTOR_ALPHA`` if set (0.05 or 0.01), else 0.05."""
+    alpha = float(os.environ.get("DETECTOR_ALPHA", DEFAULT_ALPHA))
+    if alpha not in ALPHA_KEYS:
+        raise ValueError(f"DETECTOR_ALPHA must be one of {sorted(ALPHA_KEYS)}, got {alpha}")
+    return alpha
+
+
+def _get_abstention_gate(bucket: str, alpha: float) -> AbstentionGate:
     """A one-bucket AbstentionGate built from the calibration.json snapshot.
 
     Reuses :class:`src.calibration.abstention.AbstentionGate`'s tested
     three-way rule rather than re-implementing it here.
     """
-    key = f"abstention_gate:{bucket}"
+    key = f"abstention_gate:{bucket}:{alpha}"
     if key not in _cache:
         bucket_cal = _get_calibration()["buckets"][bucket]
-        calibrator = ConformalCalibrator(alpha=0.01)
-        calibrator.thresholds[bucket] = bucket_cal["tau_machine"]
+        calibrator = ConformalCalibrator(alpha=alpha)
+        calibrator.thresholds[bucket] = bucket_cal[ALPHA_KEYS[alpha]]
         _cache[key] = AbstentionGate(calibrator, lower_threshold={bucket: bucket_cal["human_median"]})
     return _cache[key]
+
+
+def apply_deployment_rules(verdict: str, bucket: str, text: str) -> tuple[str, str | None]:
+    """Deployment-only overrides applied after the gate; returns ``(verdict, reason or None)``."""
+    if bucket == "cm" and verdict == "HUMAN" and len(text.split()) < CM_SHORT_WORDS:
+        return "ABSTAIN", CM_SHORT_REASON
+    return verdict, None
 
 
 def _resolve_language(text: str, language: str | None) -> str:
@@ -207,8 +234,10 @@ def analyse_text(text: str, language: str | None) -> dict[str, Any]:
     temperature = calibration["buckets"][bucket]["temperature"]
     calibrated_prob = float(1.0 / (1.0 + np.exp(-logit / temperature)))
 
-    gate = _get_abstention_gate(bucket)
+    alpha = get_alpha()
+    gate = _get_abstention_gate(bucket, alpha)
     verdict, confidence = gate.decide(calibrated_prob, bucket)
+    verdict, reason = apply_deployment_rules(verdict, bucket, text)
 
     contributions = fuser.head_contributions(head_scores, [bucket])[0]
     driving_head = "stylometric" if abs(contributions["headA"]) >= abs(contributions["headB"]) else "curvature"
@@ -234,7 +263,9 @@ def analyse_text(text: str, language: str | None) -> dict[str, Any]:
             "bucket": bucket,
             "code_mix_ratio": detected["code_mix_ratio"],
             "calibrated_probability": calibrated_prob,
-            "tau_machine": calibration["buckets"][bucket]["tau_machine"],
+            "alpha": alpha,
+            "tau_machine": calibration["buckets"][bucket][ALPHA_KEYS[alpha]],
+            "reason": reason,
             "human_median": calibration["buckets"][bucket]["human_median"],
             "head_contributions": contributions,
         },

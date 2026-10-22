@@ -1,8 +1,12 @@
-"""Tests for src.baselines.perplexity_threshold (scaffold stub). Serves Phase 2 §2.2.1."""
+"""Tests for src.baselines.perplexity_threshold.
+
+Skipped: src/baselines/perplexity_threshold.py is an unimplemented stub; the ppl baseline is the Qwen2.5-0.5B "ppl" column in src.eval.score (exercised by tests/features/test_curvature.py).
+"""
 from __future__ import annotations
 
+import pytest
 
+
+@pytest.mark.skip(reason='src/baselines/perplexity_threshold.py is an unimplemented stub; the ppl baseline is the Qwen2.5-0.5B "ppl" column in src.eval.score (exercised by tests/features/test_curvature.py).')
 def test_score_contract() -> None:
-    """Placeholder: score(texts) returns a 1-D np.ndarray of len(texts)."""
-    # TODO(phase-2 step-2.2.1): test perplexity baseline score contract.
     raise NotImplementedError

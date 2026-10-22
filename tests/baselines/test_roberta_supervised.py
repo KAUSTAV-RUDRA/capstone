@@ -1,8 +1,12 @@
-"""Tests for src.baselines.roberta_supervised (scaffold stub). Serves Phase 2 §2.2.1."""
+"""Tests for src.baselines.roberta_supervised.
+
+Skipped: the supervised XLM-R baseline was never built (T1 reports three zero-shot baselines); src/baselines/roberta_supervised.py is an unimplemented stub.
+"""
 from __future__ import annotations
 
+import pytest
 
+
+@pytest.mark.skip(reason='the supervised XLM-R baseline was never built (T1 reports three zero-shot baselines); src/baselines/roberta_supervised.py is an unimplemented stub.')
 def test_fit_then_score_contract() -> None:
-    """Placeholder: fit on seen split; score(texts) returns (n,); no leakage."""
-    # TODO(phase-2 step-2.2.1): test supervised baseline fit/score contract.
     raise NotImplementedError

@@ -120,3 +120,38 @@ class LanguageIdentifierTests(TestCase):
         assert services._resolve_language("यह हिंदी है", "en") == "en"
         assert services._resolve_language("यह हिंदी है", "auto") == "hi"
         assert services._resolve_language("plain english text here", None) == "en"
+
+
+class DeploymentRuleTests(TestCase):
+    """cm text under 50 words: HUMAN -> ABSTAIN (with reason); MACHINE/ABSTAIN and other buckets untouched."""
+
+    def test_short_cm_human_becomes_abstain_with_reason(self) -> None:
+        from . import services
+
+        short = "yaar kal exam tha " * 5                          # 15 words
+        self.assertEqual(services.apply_deployment_rules("HUMAN", "cm", short),
+                         ("ABSTAIN", "too short to confirm as human"))
+
+    def test_other_cases_are_unchanged(self) -> None:
+        from . import services
+
+        short, long_ = "yaar kal exam tha " * 5, "yaar kal exam tha " * 20       # 15 and 60 words
+        self.assertEqual(services.apply_deployment_rules("MACHINE", "cm", short), ("MACHINE", None))
+        self.assertEqual(services.apply_deployment_rules("ABSTAIN", "cm", short), ("ABSTAIN", None))
+        self.assertEqual(services.apply_deployment_rules("HUMAN", "cm", long_), ("HUMAN", None))
+        self.assertEqual(services.apply_deployment_rules("HUMAN", "en", short), ("HUMAN", None))
+        self.assertEqual(services.apply_deployment_rules("HUMAN", "cm", " ".join(["w"] * 50)), ("HUMAN", None))
+
+    def test_default_alpha_is_005_and_override_is_validated(self) -> None:
+        import os
+
+        from . import services
+
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("DETECTOR_ALPHA", None)
+            self.assertEqual(services.get_alpha(), 0.05)
+        with patch.dict(os.environ, {"DETECTOR_ALPHA": "0.01"}):
+            self.assertEqual(services.get_alpha(), 0.01)
+        with patch.dict(os.environ, {"DETECTOR_ALPHA": "0.2"}):
+            with self.assertRaises(ValueError):
+                services.get_alpha()
